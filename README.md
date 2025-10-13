@@ -36,7 +36,7 @@ OneMindArmy is a C++ framework for implementing multi-player, perfect- and imper
 
 Clone the main repository and its dependencies:
 ```bash
-git clone https://github.com/<your-username>/OneMindArmy.git
+git clone https://github.com/amaurygaborit/OneMindArmy.git
 ```
 ```bash
 cd OneMindArmy
