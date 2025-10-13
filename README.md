@@ -44,4 +44,3 @@ cd OneMindArmy
 ```bash
 git clone --depth 1 https://github.com/jbeder/yaml-cpp.git external/yaml-cpp
 ```
-git clone --depth 1 https://github.com/jbeder/yaml-cpp.git external/yaml-cpp
