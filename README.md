@@ -32,4 +32,10 @@ OneMindArmy is a C++ framework for implementing multi-player, perfect- and imper
 - **NVIDIA CUDA Toolkit** (GPU required for inference and training)
   - Download from NVIDIA’s official site and install compatible drivers.
 
-Built with **Visual Studio 2022 / C++20**, cross-platform support via CMake.
+## Getting Started
+
+Clone the main repository and its dependencies:
+```bash
+git clone https://github.com/<your-username>/OneMindArmy.git
+cd OneMindArmy
+git clone --depth 1 https://github.com/jbeder/yaml-cpp.git external/yaml-cpp
