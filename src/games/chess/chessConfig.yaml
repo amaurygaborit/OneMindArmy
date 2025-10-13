@@ -1,0 +1,43 @@
+name: chess
+
+common:
+  # Engine
+  engine:
+    numPlayers: 2
+    maxValidActions: 218
+
+  # Renderer
+  renderer:
+    renderState:        true
+    renderValidActions: false
+    renderActionPlayed: true
+    renderResult:       true
+    
+  # Model
+  model:
+    maxNodes: 100000
+    numBeliefSamples: 1
+    cPUCT: 1
+    keepK: 5
+    maxDepth: 100
+
+    stateSpaceSize:  6784
+    actionSpaceSize: 4672
+
+  # Inference
+  inference:
+    numHumans: 0
+
+  # Training
+  training:
+    bufferSize:   10000
+    batchSize:    64
+    learningRate: 0.001
+    epochs:       100
+
+gameSpecific:
+  # ChessRenderer specific
+  whiteAtBottom:   true
+  showCoordinates: true
+  renderRawState:  false
+  

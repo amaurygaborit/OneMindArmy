@@ -1,0 +1,16 @@
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Build directories
+build/
+*.obj
+*.pdb
+*.exe
+*.ilk
+*.log
+*.idb
+*.ipdb

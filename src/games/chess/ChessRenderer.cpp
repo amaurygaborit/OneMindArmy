@@ -1,0 +1,186 @@
+﻿#include <iostream>
+#include <bitset>
+#ifdef _WIN32
+    #include <windows.h>
+#endif
+
+#include "ChessRenderer.hpp"
+
+ChessRenderer::ChessRenderer()
+{
+    #ifdef _WIN32
+        SetConsoleOutputCP(CP_UTF8);
+    #endif
+}
+
+void ChessRenderer::specificSetup(const YAML::Node& config)
+{
+    std::cout << "ChessRenderer setup called\n";
+
+    if (!config["gameSpecific"]["renderRawState"])
+        throw std::runtime_error("Configuration missing 'gameSpecific.renderRawState' field");
+
+    m_isRenderRawState = config["gameSpecific"]["renderRawState"].as<bool>();
+}
+
+void ChessRenderer::dispBoard(uint64_t board) const
+{
+    for (int rank = 7; rank >= 0; --rank)
+    {
+        for (int file = 0; file < 8; ++file)
+        {
+            if (board & (1ULL << (8 * rank + file)))
+                std::cout << "1 ";
+            else
+                std::cout << "0 ";
+        }
+        std::cout << "\n";
+    }
+    std::cout << std::endl;
+}
+
+void ChessRenderer::renderRawState(const ObsStateT<ChessTag>& obsState) const
+{
+    std::cout << "\n=== Raw State ===\n";
+
+    std::cout << "\n--- White Pieces ---\n";
+    for (int i = 0; i < 6; ++i)
+    {
+        std::cout << kPiecesName[i] << std::endl;
+        dispBoard(obsState.elems.whiteBB[i]);
+    }
+
+    std::cout << "\n--- Black Pieces ---\n";
+    for (int i = 0; i < 6; ++i)
+    {
+        std::cout << kPiecesName[i] << std::endl;
+        dispBoard(obsState.elems.blackBB[i]);
+    }
+
+    uint64_t enPassantBB = obsState.meta.enPassant;
+    std::string enPassantName = enPassantBB ? kSquaresName[enPassantBB] : "-";
+
+    std::cout << "--- Meta Information ---\n";
+    std::cout << "Turn: " << kColor[obsState.meta.trait] << "\n";
+    std::cout << "Castling rights: " << std::bitset<4>(obsState.meta.castlingRights) << "\n";
+    std::cout << "En passant: " << enPassantName << "\n";
+    std::cout << "Halfmoves since last irreversible move: " << static_cast<int>(obsState.meta.halfmoveClock) << "\n";
+    std::cout << "Total move count: " << static_cast<int>(obsState.meta.fullmoveNumber) << "\n";
+    std::cout << "Repetitions: " << static_cast<int>(obsState.meta.repetitions) << "\n";
+    std::cout << std::endl;
+}
+
+void ChessRenderer::renderState(const ObsStateT<ChessTag>& obsState) const
+{
+    if (m_isRenderRawState)
+        renderRawState(obsState);
+
+    if (!m_isRenderState)
+        return;
+
+    // Display title in bold
+    std::cout << "\033[1mCurrent position:\033[0m" << std::endl << std::endl;
+
+    // Display file indices at the top
+    std::cout << "   ";
+    for (int file = 0; file < 8; ++file)
+    {
+        std::cout << " " << static_cast<char>('A' + file) << " ";
+    }
+    std::cout << std::endl;
+
+    // Display the chessboard
+    for (int rank = 7; rank >= 0; --rank)
+    {
+        std::cout << " " << (rank + 1) << " ";
+        for (int file = 0; file < 8; ++file)
+        {
+            // Determine square color based on parity
+            bool darkSquare = ((rank + file) % 2 == 0);
+            if (darkSquare)
+                std::cout << "\033[48;5;17m";   // Dark blue background
+            else
+                std::cout << "\033[48;5;75m";   // Light blue background
+
+            // Bold text
+            std::cout << "\033[1m";
+
+            // Get square code
+            int code = 0; // empty square
+            for (int ch = 0; ch < 6; ++ch)
+            {
+                if (obsState.elems.whiteBB[ch] & (1ULL << (rank * 8 + file)))
+                {
+                    code = 1 + ch; // 1–6 for white pieces
+                    break;
+                }
+            }
+            for (int ch = 0; ch < 6; ++ch)
+            {
+                if (obsState.elems.blackBB[ch] & (1ULL << (rank * 8 + file)))
+                {
+                    code = 7 + ch; // 7–12 for black pieces
+                    break;
+                }
+            }
+
+            // Choose text color based on piece color
+            if (code >= 1 && code <= 6)
+                std::cout << "\033[97m";        // White piece: white text
+            else if (code >= 7 && code <= 12)
+                std::cout << "\033[38;5;16m";   // Black piece: black text
+
+            // Display the square
+            std::cout << "\u00A0" << kPiecesSymbol[code] << "\u00A0" << "\033[0m"; // Reset colors
+        }
+        // Display rank index on the right
+        std::cout << " " << (rank + 1);
+        std::cout << std::endl;
+    }
+
+    // Display file indices at the bottom
+    std::cout << "   ";
+    for (int file = 0; file < 8; ++file)
+    {
+        std::cout << " " << static_cast<char>('A' + file) << " ";
+    }
+    std::cout << std::endl;
+    std::cout << kColor[obsState.meta.trait] << " to play." << std::endl;
+}
+
+void ChessRenderer::renderValidActions(const ObsStateT<ChessTag>& obsState) const
+{
+    if (!m_isRenderValidActions)
+        return;
+
+    AlignedVec<ActionT<ChessTag>> validActions(reserve_only, m_engine->getMaxValidActions());
+    m_engine->getValidActions(obsState, validActions);
+
+    std::cout << "Legal move:" << std::endl;
+    for (int i = 0; i < validActions.size(); ++i)
+    {
+        int start = validActions[i].from();
+        int dest = validActions[i].to();
+        int promo = validActions[i].promo();
+        std::cout << kSquaresName[start] << kSquaresName[dest] << kPromosLetter[promo] << std::endl;
+    }
+}
+
+void ChessRenderer::renderActionPlayed(const ActionT<ChessTag>& action, const size_t idPlayer) const
+{
+    if (!m_isRenderActionPlayed)
+        return;
+
+    std::cout << kColor[idPlayer] << " played: "
+        << kSquaresName[action.from()]
+        << kSquaresName[action.to()]
+        << kPromosLetter[action.promo()] << std::endl;
+}
+
+void ChessRenderer::renderResult(const ObsStateT<ChessTag>& obsState) const
+{
+    if (!m_isRenderResult)
+        return;
+
+
+}
