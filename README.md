@@ -37,5 +37,11 @@ OneMindArmy is a C++ framework for implementing multi-player, perfect- and imper
 Clone the main repository and its dependencies:
 ```bash
 git clone https://github.com/<your-username>/OneMindArmy.git
+```
+```bash
 cd OneMindArmy
+```
+```bash
+git clone --depth 1 https://github.com/jbeder/yaml-cpp.git external/yaml-cpp
+```
 git clone --depth 1 https://github.com/jbeder/yaml-cpp.git external/yaml-cpp
