@@ -4,11 +4,16 @@
 struct ChessTag {};
 
 template<>
-struct GameTraits<ChessTag>
+struct ITraits<ChessTag>
 {
-    static constexpr uint16_t kNumElems = 12;
-    static constexpr uint16_t kNumMeta = 6;
-    static constexpr uint16_t kNumPrivatePos = 0;
+    static constexpr size_t kNumPlayers = 2;        // White, Black
+	
+    static constexpr size_t kNumElems = 12;         // 6 piece types * 2 colors
+	static constexpr size_t kNumMeta = 6;           // trait, castling rights, en passant, halfmove clock, fullmove number, repetitions	
+    static constexpr size_t kActionSpace = 4672;    // 8x8x73
+    
+    static constexpr size_t kNumPos = 64;           // 8x8 board
+    static constexpr size_t kMaxValidActions = 218; // 218 maximum actions in any position
 
     struct ObsElems
     {

@@ -4,18 +4,17 @@
 #include <cstddef>
 #include <limits>
 #include <type_traits>
+#include <concepts>
 
 template<typename GameTag>
-struct GameTraits;
+struct ITraits;
 
 template<typename GameTag>
-using ObsElemsT = typename GameTraits<GameTag>::ObsElems;
-
+using ObsElemsT = typename ITraits<GameTag>::ObsElems;
 template<typename GameTag>
-using MetaT = typename GameTraits<GameTag>::Meta;
-
+using MetaT = typename ITraits<GameTag>::Meta;
 template<typename GameTag>
-using ActionT = typename GameTraits<GameTag>::Action;
+using ActionT = typename ITraits<GameTag>::Action;
 
 template<typename GameTag>
 struct ObsStateT
@@ -24,82 +23,198 @@ struct ObsStateT
     MetaT<GameTag>     meta;
 };
 
-/// For the model ///
+template<size_t maxValue>
+struct SelectMinimalUInt
+{
+    using type = std::conditional_t<(maxValue <= UINT8_MAX), uint8_t,
+        std::conditional_t<(maxValue <= UINT16_MAX), uint16_t,
+        std::conditional_t<(maxValue <= UINT32_MAX), uint32_t,
+        uint64_t>>>;
+};
+template<size_t maxValue>
+using SelectMinimalUIntT = typename SelectMinimalUInt<maxValue>::type;
+
+template<typename T>
+concept ValidGameTraits = requires
+{
+    { T::kNumPlayers } -> std::convertible_to<size_t>;
+    { T::kNumElems } -> std::convertible_to<size_t>;
+    { T::kNumMeta } -> std::convertible_to<size_t>;
+    { T::kActionSpace } -> std::convertible_to<size_t>;
+    { T::kNumPos } -> std::convertible_to<size_t>;
+    { T::kMaxValidActions } -> std::convertible_to<size_t>;
+    typename T::ObsElems;
+    typename T::Meta;
+    typename T::Action;
+}
+&& (T::kNumPlayers > 0 && T::kNumPlayers <= 64)
+&& (T::kNumElems > 0)
+&& (T::kNumMeta > 0)
+&& (T::kActionSpace > 0)
+&& (T::kNumPos > 0)
+&& (T::kMaxValidActions > 0);
+
+template<typename GameTag>
+struct UIntTypes
+{
+    static constexpr size_t kNumPlayers = ITraits<GameTag>::kNumPlayers + 1;
+    static constexpr size_t kNumElems = ITraits<GameTag>::kNumElems;
+    static constexpr size_t kNumMeta = ITraits<GameTag>::kNumMeta;
+    static constexpr size_t kActionSpace = ITraits<GameTag>::kActionSpace;
+    static constexpr size_t kTotalFacts = kNumElems + kNumMeta + kActionSpace + 1;
+    static constexpr size_t kNumPos = ITraits<GameTag>::kNumPos + 1;
+    static constexpr size_t kMaxValidActions = ITraits<GameTag>::kMaxValidActions;
+
+    using FIdx = SelectMinimalUIntT<kTotalFacts>;
+    using PIdx = SelectMinimalUIntT<kNumPos>;
+    using OIdx = SelectMinimalUIntT<kNumPlayers>;
+
+    using VMask = std::conditional_t<(kNumPlayers <= 8), uint8_t,
+        std::conditional_t<(kNumPlayers <= 16), uint16_t,
+        std::conditional_t<(kNumPlayers <= 32), uint32_t,
+        uint64_t>>>;
+};
+
 enum class FactType : uint8_t
 {
-    ELEMENT,
-    META,
-    ACTION
+    ELEMENT = 0,
+    META = 1,
+    ACTION = 2,
+    N_FACT_TYPES
 };
 
-enum class Privacy : uint8_t
-{
-    PUBLIC,
-    PRIVATE
-};
-
+template<typename GameTag>
 struct Fact
 {
-    uint16_t factIdx;       // index global (embedding id)
-    uint16_t posIdx;        // position id (or kPadPos)
-    FactType typeIdx;       // ELEMENT / META / ACTION
-    Privacy  privacyIdx;    // PUBLIC / PRIVATE
+    using Types = UIntTypes<GameTag>;
+    using FIdx = typename Types::FIdx;
+    using VMask = typename Types::VMask;
+    using PIdx = typename Types::PIdx;
+    using OIdx = typename Types::OIdx;
 
-    static constexpr uint16_t kPadPos = UINT16_MAX;
+    static constexpr size_t kNumPlayers = Types::kNumPlayers;
 
-    // Helpers
+    FIdx     factIdx;
+    VMask    visibleMask;
+    PIdx     posIdx;
+    OIdx     ownerIdx;
+    FactType typeIdx;
+
+    static constexpr VMask kVisibleToAll =
+        static_cast<VMask>((static_cast<VMask>(1) << kNumPlayers) - static_cast<VMask>(1));
+    static constexpr VMask kVisibleToNone = static_cast<VMask>(0);
+
     constexpr bool isElement() const noexcept { return typeIdx == FactType::ELEMENT; }
-    constexpr bool isMeta()    const noexcept { return typeIdx == FactType::META; }
-    constexpr bool isAction()  const noexcept { return typeIdx == FactType::ACTION; }
-    constexpr bool isPublic()  const noexcept { return privacyIdx == Privacy::PUBLIC; }
+    constexpr bool isMeta() const noexcept { return typeIdx == FactType::META; }
+    constexpr bool isAction() const noexcept { return typeIdx == FactType::ACTION; }
 
-    // Factories
-    static constexpr void makePrivateElem(std::uint16_t fIdx, std::uint16_t pIdx, Fact& out) noexcept
+    static constexpr Fact MakePad(FactType type) noexcept
     {
-        out.factIdx = fIdx;
-        out.posIdx = pIdx;
-        out.typeIdx = FactType::ELEMENT;
-        out.privacyIdx = Privacy::PRIVATE;
+        Fact f{};
+        f.factIdx = static_cast<FIdx>(0);
+        f.visibleMask = kVisibleToNone;
+        f.posIdx = static_cast<PIdx>(0);
+        f.ownerIdx = static_cast<OIdx>(0);
+        f.typeIdx = type;
+        return f;
     }
 
-    static constexpr void makePublicElem(std::uint16_t fIdx, std::uint16_t pIdx, Fact& out) noexcept
+    static constexpr Fact MakePublicPad() noexcept
     {
-        out.factIdx = fIdx;
-        out.posIdx = pIdx;
-        out.typeIdx = FactType::ELEMENT;
-        out.privacyIdx = Privacy::PUBLIC;
+        Fact f{};
+        f.factIdx = static_cast<FIdx>(0);
+        f.visibleMask = kVisibleToAll;
+        f.posIdx = static_cast<PIdx>(0);
+        f.ownerIdx = static_cast<OIdx>(0);
+        f.typeIdx = FactType::ELEMENT;
+        return f;
     }
 
-    static constexpr void makeMeta(std::uint16_t fIdx, Fact& out) noexcept
+    static constexpr Fact makePrivateElem(FIdx fIdx, PIdx pIdx, OIdx playerZeroIndexed) noexcept
     {
-        out.factIdx = fIdx;
-        out.posIdx = kPadPos;
-        out.typeIdx = FactType::META;
-        out.privacyIdx = Privacy::PUBLIC;
+        Fact f{};
+        f.factIdx = static_cast<FIdx>(fIdx + 1);
+        f.visibleMask = static_cast<VMask>(VMask{ 1 } << playerZeroIndexed);
+        f.posIdx = static_cast<PIdx>(pIdx + 1);
+        f.ownerIdx = static_cast<OIdx>(playerZeroIndexed + 1);
+        f.typeIdx = FactType::ELEMENT;
+        return f;
     }
 
-    static constexpr void makePublicAction(std::uint16_t fIdx, std::uint16_t pIdx, Fact& out) noexcept
+    static constexpr Fact makePublicElem(FIdx fIdx, PIdx pIdx) noexcept
     {
-        out.factIdx = fIdx;
-        out.posIdx = pIdx;
-        out.typeIdx = FactType::ACTION;
-        out.privacyIdx = Privacy::PUBLIC;
+        Fact f{};
+        f.factIdx = static_cast<FIdx>(fIdx + 1);
+        f.visibleMask = kVisibleToAll;
+        f.posIdx = static_cast<PIdx>(pIdx + 1);
+        f.ownerIdx = 0;
+        f.typeIdx = FactType::ELEMENT;
+        return f;
     }
 
-    static constexpr void makePrivateAction(std::uint16_t fIdx, std::uint16_t pIdx, Fact& out) noexcept
+    static constexpr Fact makeMeta(FIdx fIdx) noexcept
     {
-        out.factIdx = fIdx;
-        out.posIdx = pIdx;
-        out.typeIdx = FactType::ACTION;
-        out.privacyIdx = Privacy::PRIVATE;
+        Fact f{};
+        f.factIdx = static_cast<FIdx>(fIdx + 1);
+        f.visibleMask = kVisibleToNone;
+        f.posIdx = 0;
+        f.ownerIdx = 0;
+        f.typeIdx = FactType::META;
+        return f;
+    }
+
+    static constexpr Fact makePrivateAction(FIdx fIdx, PIdx pIdx, OIdx playerZeroIndexed) noexcept
+    {
+        Fact f{};
+        f.factIdx = static_cast<FIdx>(fIdx + 1);
+        f.visibleMask = static_cast<VMask>(VMask{ 1 } << playerZeroIndexed);
+        f.posIdx = static_cast<PIdx>(pIdx + 1);
+        f.ownerIdx = static_cast<OIdx>(playerZeroIndexed + 1);
+        f.typeIdx = FactType::ACTION;
+        return f;
+    }
+
+    static constexpr Fact makePublicAction(FIdx fIdx, PIdx pIdx) noexcept
+    {
+        Fact f{};
+        f.factIdx = static_cast<FIdx>(fIdx + 1);
+        f.visibleMask = kVisibleToAll;
+        f.posIdx = static_cast<PIdx>(pIdx + 1);
+        f.ownerIdx = 0;
+        f.typeIdx = FactType::ACTION;
+        return f;
+    }
+
+    constexpr void setVisibleTo(OIdx playerZeroIndexed) noexcept
+    {
+        visibleMask |= static_cast<VMask>(VMask{ 1 } << playerZeroIndexed);
+    }
+    constexpr void setVisibleToAll() noexcept
+    {
+        visibleMask = kVisibleToAll;
+    }
+    constexpr void clearVisibleTo(OIdx playerZeroIndexed) noexcept
+    {
+        visibleMask &= ~static_cast<VMask>(VMask{ 1 } << playerZeroIndexed);
+    }
+    constexpr void clearVisibleToAll() noexcept
+    {
+        visibleMask = kVisibleToNone;
     }
 };
 
 template<typename GameTag>
 struct IdxStateT
 {
-    std::array<Fact, GameTraits<GameTag>::kNumElems> elemFacts;
-    std::array<Fact, GameTraits<GameTag>::kNumMeta>  metaFacts;
+    std::array<Fact<GameTag>, ITraits<GameTag>::kNumElems> elemFacts;
+    std::array<Fact<GameTag>, ITraits<GameTag>::kNumMeta>  metaFacts;
+
+    IdxStateT() noexcept
+    {
+        elemFacts.fill(Fact<GameTag>::MakePad(FactType::ELEMENT));
+        metaFacts.fill(Fact<GameTag>::MakePad(FactType::META));
+    }
 };
 
-using IdxActionT = Fact;
+template<typename GameTag>
+using IdxActionT = Fact<GameTag>;

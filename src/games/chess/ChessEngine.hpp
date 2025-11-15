@@ -6,12 +6,10 @@
 class ChessEngine : public IEngine<ChessTag>
 {
 private:
-    AlignedVec<ActionT<ChessTag>> m_validActionsBuf;
+    bool isFiftyMoveRule(const ObsState& obsState) const;
+    bool isInsufficientMaterial(const ObsState& obsState) const;
 
-    bool isFiftyMoveRule(const ObsStateT<ChessTag>& obsState);
-    bool isInsufficientMaterial(const ObsStateT<ChessTag>& obsState);
-
-    bool ourKingInCheck(const ObsStateT<ChessTag>& obsState);
+    bool ourKingInCheck(const ObsState& obsState) const;
 
 protected:
 	void specificSetup(const YAML::Node& config) override;
@@ -19,16 +17,18 @@ protected:
 public:
 	ChessEngine();
 
-    void getInitialState(ObsStateT<ChessTag>& out) override;
-    uint8_t getCurrentPlayer(const ObsStateT<ChessTag>& obsState) override;
-    void getValidActions(const ObsStateT<ChessTag>& obsState, AlignedVec<ActionT<ChessTag>>& out) override;
-    bool isValidAction(const ObsStateT<ChessTag>& obsState, const ActionT<ChessTag>& action) override;
-    void applyAction(const ActionT<ChessTag>& action, ObsStateT<ChessTag>& out) override;
-    bool isTerminal(const ObsStateT<ChessTag>& obsState, AlignedVec<float>& out) override;
+    void getInitialState(const size_t player, ObsState& out) const override;
 
-    void obsToIdx(const ObsStateT<ChessTag>& obsState, IdxStateT<ChessTag>& out) override;
-    void idxToObs(const IdxStateT<ChessTag>& idxInput, ObsStateT<ChessTag>& out) override;
+    size_t getCurrentPlayer(const ObsState& obsState) const override;
 
-    void actionToIdx(const ActionT<ChessTag>& action, IdxActionT& out) override;
-    void idxToAction(const IdxActionT& idxAction, ActionT<ChessTag>& out) override;
+    void getValidActions(const ObsState& obsState, AlignedVec<Action>& out) const override;
+    bool isValidAction(const ObsState& obsState, const Action& action) const override;
+    void applyAction(const Action& action, ObsState& out) const override;
+    bool isTerminal(const ObsState& obsState, AlignedVec<float>& out) const override;
+
+    void obsToIdx(const ObsState& obsState, IdxState& out) const override;
+    void idxToObs(const IdxState& idxInput, ObsState& out) const override;
+
+    void actionToIdx(const Action& action, IdxAction& out) const override;
+    void idxToAction(const IdxAction& idxAction, Action& out) const override;
 };

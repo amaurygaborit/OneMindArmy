@@ -11,15 +11,14 @@ PerftTool::PerftTool(std::shared_ptr<IEngine<ChessTag>> engine) : m_engine(std::
 {
 }
 
-uint64_t PerftTool::perft(const ObsStateT<ChessTag>& root, int maxDepth)
+uint64_t PerftTool::perft(const ObsState& root, int maxDepth)
 {
     const int D = maxDepth;
-    AlignedVec<ObsStateT<ChessTag>> obsStates(D + 1);
+    AlignedVec<ObsState> obsStates(D + 1);
 
-    size_t maxActions = m_engine->getMaxValidActions();
-    AlignedVec<AlignedVec<ActionT<ChessTag>>> actions(reserve_only, D + 1);
+    AlignedVec<AlignedVec<Action>> actions(reserve_only, D + 1);
     for (int d = 0; d <= D; ++d)
-        actions.emplace_back(maxActions);
+        actions.emplace_back(GT::kMaxValidActions);
 
     AlignedVec<size_t> cursor(D + 1);
     AlignedVec<size_t> count(D + 1);
@@ -39,13 +38,13 @@ uint64_t PerftTool::perft(const ObsStateT<ChessTag>& root, int maxDepth)
         if (cursor[depth] < count[depth])
         {
             // 1) Récupère le coup
-            ActionT<ChessTag> mv = actions[depth][cursor[depth]++];
+            Action mv = actions[depth][cursor[depth]++];
 
             // 2) Copie l'état
             std::memcpy(
                 &obsStates[depth + 1],
                 &obsStates[depth],
-                sizeof(ObsStateT<ChessTag>)
+                sizeof(ObsState)
             );
 
             // 3) Applique le coup
@@ -93,7 +92,7 @@ void PerftTool::runNormal(const AlignedVec<PerftTest>& normalTests)
     }
     for (auto const& t : normalTests)
     {
-        ObsStateT<ChessTag> state;
+        ObsState state;
         FenParser::getFenState(t.fen, state);
 
         auto t0 = std::chrono::high_resolution_clock::now();
@@ -118,20 +117,20 @@ void PerftTool::runDivide(const AlignedVec<PerftTest>& divideTests)
     {
         std::cout << "[Divide] " << t.name << " d=" << t.depth << "\n";
 
-        ObsStateT<ChessTag> root;
+        ObsState root;
         FenParser::getFenState(t.fen, root);
 
         // actions racine
-        AlignedVec<ActionT<ChessTag>> rootActs(reserve_only, m_engine->getMaxValidActions());
+        AlignedVec<Action> rootActs(reserve_only, GT::kMaxValidActions);
         m_engine->getValidActions(root, rootActs);
-        AlignedVec<std::pair<ActionT<ChessTag>, uint64_t>> result(reserve_only, rootActs.size());
+        AlignedVec<std::pair<Action, uint64_t>> result(reserve_only, rootActs.size());
 
 		double totalTime = 0.0;
         uint64_t totalNodes = 0;
 
         for (size_t i = 0; i < rootActs.size(); ++i)
         {
-            ObsStateT<ChessTag> tmp = root;
+            ObsState tmp = root;
             m_engine->applyAction(rootActs[i], tmp);
 
             auto t0 = std::chrono::high_resolution_clock::now();
@@ -145,16 +144,25 @@ void PerftTool::runDivide(const AlignedVec<PerftTest>& divideTests)
 
             result.emplace_back(rootActs[i], nodes);
 
-            std::cout << kSquaresName[rootActs[i].from()] << kSquaresName[rootActs[i].to()] << kPromosLetter[rootActs[i].promo()] << ": " << nodes << "\n";
+            std::cout << kSquaresName[rootActs[i].from()]
+                << kSquaresName[rootActs[i].to()]
+                << kPromosLetter[rootActs[i].promo()]
+                << ": " << nodes
+                << "\n";
         }
         if (t.expected > 0)
         {
             bool pass = totalNodes == t.expected;
-            std::cout << "TOTAL=" << totalNodes << " time=" << totalTime << "ms" << (pass ? " [PASS]" : " [FAIL]") << "\n\n";
+            std::cout << "TOTAL=" << totalNodes
+                << " time=" << totalTime << "ms"
+                << (pass ? " [PASS]" : " [FAIL]")
+                << "\n\n";
         }
         else
         {
-            std::cout << "TOTAL=" << totalNodes << " time=" << totalTime << "ms" << "\n\n";
+            std::cout << "TOTAL=" << totalNodes
+                << " time=" << totalTime << "ms"
+                << "\n\n";
         }
     }
 }

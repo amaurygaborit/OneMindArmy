@@ -1,11 +1,6 @@
 name: chess
 
 common:
-  # Engine
-  engine:
-    numPlayers: 2
-    maxValidActions: 218
-
   # Renderer
   renderer:
     renderState:        true
@@ -15,14 +10,19 @@ common:
     
   # Model
   model:
-    maxNodes: 100000
-    numBeliefSamples: 1
-    cPUCT: 1
-    keepK: 5
+    autoInitialState: true
+
+    maxNodes:   1000000
+    maxSamples: 1
+
+    numThreads: 4
+    mctsBatchSize: 64
+    historySize: 8
     maxDepth: 100
 
-    stateSpaceSize:  6784
-    actionSpaceSize: 4672
+    cPUCT:    1.5
+    virtualLoss: 1
+    keepK:    5
 
   # Inference
   inference:
@@ -30,10 +30,10 @@ common:
 
   # Training
   training:
-    bufferSize:   10000
-    batchSize:    64
-    learningRate: 0.001
-    epochs:       100
+    bufferSize:        10000
+    trainingBatchSize: 64
+    learningRate:      0.001
+    epochs:            100
 
 gameSpecific:
   # ChessRenderer specific

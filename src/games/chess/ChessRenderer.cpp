@@ -39,7 +39,7 @@ void ChessRenderer::dispBoard(uint64_t board) const
     std::cout << std::endl;
 }
 
-void ChessRenderer::renderRawState(const ObsStateT<ChessTag>& obsState) const
+void ChessRenderer::renderRawState(const ObsState& obsState) const
 {
     std::cout << "\n=== Raw State ===\n";
 
@@ -70,7 +70,7 @@ void ChessRenderer::renderRawState(const ObsStateT<ChessTag>& obsState) const
     std::cout << std::endl;
 }
 
-void ChessRenderer::renderState(const ObsStateT<ChessTag>& obsState) const
+void ChessRenderer::renderState(const ObsState& obsState) const
 {
     if (m_isRenderRawState)
         renderRawState(obsState);
@@ -148,12 +148,12 @@ void ChessRenderer::renderState(const ObsStateT<ChessTag>& obsState) const
     std::cout << kColor[obsState.meta.trait] << " to play." << std::endl;
 }
 
-void ChessRenderer::renderValidActions(const ObsStateT<ChessTag>& obsState) const
+void ChessRenderer::renderValidActions(const ObsState& obsState) const
 {
     if (!m_isRenderValidActions)
         return;
 
-    AlignedVec<ActionT<ChessTag>> validActions(reserve_only, m_engine->getMaxValidActions());
+    AlignedVec<Action> validActions(reserve_only, GT::kMaxValidActions);
     m_engine->getValidActions(obsState, validActions);
 
     std::cout << "Legal move:" << std::endl;
@@ -166,18 +166,18 @@ void ChessRenderer::renderValidActions(const ObsStateT<ChessTag>& obsState) cons
     }
 }
 
-void ChessRenderer::renderActionPlayed(const ActionT<ChessTag>& action, const size_t idPlayer) const
+void ChessRenderer::renderActionPlayed(const Action& action, const size_t player) const
 {
     if (!m_isRenderActionPlayed)
         return;
 
-    std::cout << kColor[idPlayer] << " played: "
+    std::cout << kColor[player] << " played: "
         << kSquaresName[action.from()]
         << kSquaresName[action.to()]
         << kPromosLetter[action.promo()] << std::endl;
 }
 
-void ChessRenderer::renderResult(const ObsStateT<ChessTag>& obsState) const
+void ChessRenderer::renderResult(const ObsState& obsState) const
 {
     if (!m_isRenderResult)
         return;

@@ -8,9 +8,9 @@ void ChessRequester::specificSetup(const YAML::Node& config)
     std::cout << "ChessRequester setup called\n";
 }
 
-void ChessRequester::convertToAction(std::string& moveStr, ActionT<ChessTag>& out) const
+void ChessRequester::convertToAction(std::string& moveStr, Action& out) const
 {
-    out = ActionT<ChessTag>{};
+    out = Action{};
     int promo = 0;
     if (moveStr.length() == 5)
     {
@@ -36,7 +36,13 @@ void ChessRequester::convertToAction(std::string& moveStr, ActionT<ChessTag>& ou
     }
 }
 
-void ChessRequester::requestAction(const ObsStateT<ChessTag>& obsState, ActionT<ChessTag>& out) const
+void ChessRequester::requestInitialState(const size_t player, ObsState& out) const
+{
+	std::cout << "What is the fen?\n";
+
+}
+
+void ChessRequester::requestAction(const ObsState& obsState, Action& out) const
 {
     std::string moveStr;
     do

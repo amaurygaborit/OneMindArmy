@@ -5,7 +5,7 @@
 #include "Tables.hpp"
 #include "../../corelib/util/CompilerHints.hpp"
 
-#include <immintrin.h>
+#include <intrin.h>
 
 using map = uint64_t;
 
@@ -22,8 +22,10 @@ static constexpr map RANK_5 = 0x000000FF00000000ULL;
 static ALWAYS_INLINE
 int popLSB(uint64_t& bb) noexcept
 {
-    // tzcnt renvoie 0..63 si bb!=0, 64 si bb==0
-    unsigned long idx = (unsigned long)(_tzcnt_u64(bb) & 63u);
+    if (bb == 0) return 0;
+
+    unsigned long idx;
+    _BitScanForward64(&idx, bb);
     bb &= bb - 1;
     return static_cast<int>(idx);
 }
@@ -97,13 +99,10 @@ private:
             enPassantBB = state.meta.enPassant != 0 ? 1ULL << state.meta.enPassant : 0ULL;
         }
     };
-    static inline Board b;
-
-    static inline int pinnerOf[64];
 
     // Calcul des cases attaquées par l’adversaire
     static ALWAYS_INLINE
-        uint64_t computeAttacks() noexcept
+        uint64_t computeAttacks(const Board& b) noexcept
     {
         map atk = 0ULL;
 
@@ -150,7 +149,8 @@ private:
 
     // Calcule checkMask et pinners
     static ALWAYS_INLINE
-        void computeCheckAndPins(map& checkMask, int& checkCount, int kingSq) noexcept
+        void computeCheckAndPins(const Board& b, int* pinnerOf,
+            map& checkMask, int& checkCount, int kingSq) noexcept
     {
         // Pawns
         map pawnAttacks;
@@ -246,7 +246,7 @@ private:
 
     // Récupère le rayon de pin entre roi et pièce
     static ALWAYS_INLINE
-        map getPinRay(int kingSq, int pieceSq) noexcept
+        map getPinRay(const int* pinnerOf, int kingSq, int pieceSq) noexcept
     {
         int pinnerSq = pinnerOf[pieceSq];
         int rawIndex = kingSq * 64 + pinnerSq;
@@ -288,16 +288,22 @@ public:
     MoveGenerator() = default;
     static void countCheck(const ObsStateT<ChessTag>& state, int& out) noexcept
     {
+        Board b;
         b.setBoard(state);
 
         int kingSq = popLSB(b.ourKing);
         map checkMask = 0;
         out = 0;
-        computeCheckAndPins(checkMask, out, kingSq);
+
+        int pinnerOf[64];
+        std::memset(pinnerOf, -1, sizeof(pinnerOf));
+
+        computeCheckAndPins(b, pinnerOf, checkMask, out, kingSq);
     }
 
     static void generate(const ObsStateT<ChessTag>& state, AlignedVec<ActionT<ChessTag>>& out) noexcept
     {
+        Board b;
         b.setBoard(state);
 
         // KingBB
@@ -306,13 +312,15 @@ public:
 
         map checkMask = 0;
         int checkCount = 0;
+
+        int pinnerOf[64];
         std::memset(pinnerOf, -1, sizeof(pinnerOf));
-        computeCheckAndPins(checkMask, checkCount, kingSq);
+        computeCheckAndPins(b, pinnerOf, checkMask, checkCount, kingSq);
 
         map x = checkMask | (map)(-(int64_t)checkMask);
         map zeroFlag = (x >> 63) ^ 1ULL;
         checkMask |= (map)(-(int64_t)zeroFlag);
-        map atkSquares = computeAttacks();
+        map atkSquares = computeAttacks(b);
 
         LIKELY(if (checkCount < 2))
         {
@@ -356,7 +364,7 @@ public:
                 int from = to + signPawn * 8;
 
                 map pawnAtk = 1ULL << to;
-                map pinRay = getPinRay(kingSq, from);
+                map pinRay = getPinRay(pinnerOf, kingSq, from);
                 map finalMask = pawnAtk & pinRay;
 
                 map isPromoting;
@@ -373,7 +381,7 @@ public:
                 int from = to + signPawn * 16;
 
                 map pawnAtk = 1ULL << to;
-                map pinRay = getPinRay(kingSq, from);
+                map pinRay = getPinRay(pinnerOf, kingSq, from);
                 map finalMask = pawnAtk & pinRay;
 
                 addLegalMoves(out, from, finalMask, 0);
@@ -384,7 +392,7 @@ public:
                 int from = to + signPawn * 8 + 1;
 
                 map pawnAtk = 1ULL << to;
-                map pinMask = getPinRay(kingSq, from);
+                map pinMask = getPinRay(pinnerOf, kingSq, from);
 
                 if constexpr (bs.hasEnPassant)
                 {
@@ -440,7 +448,7 @@ public:
                 int from = to + signPawn * 8 - 1;
 
                 map pawnAtk = 1ULL << to;
-                map pinMask = getPinRay(kingSq, from);
+                map pinMask = getPinRay(pinnerOf, kingSq, from);
 
                 if constexpr (bs.hasEnPassant)
                 {
@@ -516,7 +524,7 @@ public:
                 map bishopAtk = tables.bishopAttacks[tables.bishopOffsets[bishopSq] + bishopIdx]
                     & (~b.ourOcc) & checkMask;
 
-                map pinRay = getPinRay(kingSq, bishopSq);
+                map pinRay = getPinRay(pinnerOf, kingSq, bishopSq);
                 map finalMask = bishopAtk & pinRay;
 
                 addLegalMoves(out, bishopSq, finalMask, 0);
@@ -533,7 +541,7 @@ public:
                 map rookAtk = tables.rookAttacks[tables.rookOffsets[rookSq] + rookIdx]
                     & (~b.ourOcc) & checkMask;
 
-                map pinRay = getPinRay(kingSq, rookSq);
+                map pinRay = getPinRay(pinnerOf, kingSq, rookSq);
                 map finalMask = rookAtk & pinRay;
 
                 /*

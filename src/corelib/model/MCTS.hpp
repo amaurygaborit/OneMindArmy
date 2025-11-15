@@ -1,604 +1,1023 @@
 ﻿#pragma once
 #include "../interfaces/IEngine.hpp"
 #include "NeuralNet.cuh"
+#include "../util/AtomicOps.hpp"
 
 #include <iostream>
 #include <memory>
 #include <cmath>
-#include <cstdlib>
 #include <algorithm>
+#include <vector>
+#include <atomic>
+#include <mutex>
+#include <cstring>
+
+template<typename GameTag>
+class MCTSThreadPool;
 
 template<typename GameTag>
 class MCTS
 {
 private:
+    using GT = ITraits<GameTag>;
+    using ObsState = typename ObsStateT<GameTag>;
+    using Action = typename ActionT<GameTag>;
+    using IdxState = typename IdxStateT<GameTag>;
+    using IdxAction = typename IdxActionT<GameTag>;
+    using IdxStateAction = typename IdxStateActionT<GameTag>;
+    using ModelResults = typename ModelResults<GameTag>;
+
+    static constexpr uint8_t kNumPlayers = GT::kNumPlayers;
+
+    // ============================================================================
+    // NODE STRUCTURE - Optimized for cache efficiency
+    // ============================================================================
     struct Node
     {
-		uint32_t parentIdx;     // index of the parent
-		uint32_t childOffset;   // offset in the child array
-        uint16_t childCount;    // number of legal actions
-        uint8_t flags;          // expanded, in_eval, pinned, etc.
+        std::atomic<uint32_t> parentIdx{ UINT32_MAX };
+        std::atomic<uint32_t> childOffset{ UINT32_MAX };
+        std::atomic<uint16_t> childCount{ 0 };
+        std::atomic<uint8_t> flags{ 0 };
+        // Flags: [7]=expanding, [2]=terminal, [1]=pinned, [0]=expanded
 
-        inline bool isExpanded() const noexcept { return flags & 0x1; }
-        inline bool isPinned()   const noexcept { return flags & 0x2; }
+        inline bool isExpanded() const noexcept {
+            return flags.load(std::memory_order_acquire) & 0x01;
+        }
+        inline bool isPinned() const noexcept {
+            return flags.load(std::memory_order_acquire) & 0x02;
+        }
+        inline bool isTerminal() const noexcept {
+            return flags.load(std::memory_order_acquire) & 0x04;
+        }
+        inline bool isExpanding() const noexcept {
+            return flags.load(std::memory_order_acquire) & 0x80;
+        }
 
-        inline void setExpanded(bool v) noexcept { v ? flags |= 0x1 : flags &= ~0x1; }
-        inline void setPinned(bool v) noexcept { v ? flags |= 0x2 : flags &= ~0x2; }
+        inline void setExpanded() noexcept {
+            flags.fetch_or(0x01, std::memory_order_release);
+        }
+        inline void setTerminal() noexcept {
+            flags.fetch_or(0x04, std::memory_order_release);
+        }
+        inline void setPinned(bool v) noexcept {
+            if (v) flags.fetch_or(0x02, std::memory_order_acquire);
+            else flags.fetch_and(~0x02, std::memory_order_release);
+        }
 
-        inline void reset() noexcept
-        {
-            parentIdx = UINT32_MAX;
-            childOffset = UINT32_MAX;
-            childCount = 0;
-			flags = 0;
+        // Returns true if we won the expansion lock
+        inline bool tryLockExpansion() noexcept {
+            uint8_t expected = 0;
+            return flags.compare_exchange_strong(expected, 0x80,
+                std::memory_order_acq_rel, std::memory_order_acquire);
+        }
+
+        inline void unlockExpansion() noexcept {
+            flags.fetch_and(~0x80, std::memory_order_release);
+        }
+
+        inline void reset() noexcept {
+            parentIdx.store(UINT32_MAX, std::memory_order_relaxed);
+            childOffset.store(UINT32_MAX, std::memory_order_relaxed);
+            childCount.store(0, std::memory_order_relaxed);
+            flags.store(0, std::memory_order_relaxed);
         }
     };
 
-	AlignedVec<uint32_t> m_childNodeIdx;    // child node index
-    AlignedVec<ActionT<GameTag>>  m_childAction;     // action per child slot
-    AlignedVec<float>    m_childPrior;      // prior per child slot
-    AlignedVec<uint32_t> m_childN;          // visits per child slot
-    AlignedVec<float>    m_childW;          // sum of values per child slot
+    // ============================================================================
+    // SIMULATION RESULT - What each thread stores for later backprop
+    // ============================================================================
+    struct SimulationResult
+    {
+        uint32_t leafNodeIdx;
+        std::vector<std::pair<uint32_t, uint16_t>> pathCopy; // Immutable copy of path
+        AlignedVec<IdxStateAction> historyCopy; // For inference
+        bool isTerminal;
+        AlignedVec<float> terminalValues; // Only if terminal
+
+        SimulationResult() : leafNodeIdx(UINT32_MAX), isTerminal(false) {}
+    };
+
+    // ============================================================================
+    // THREAD-LOCAL DATA - Each thread has its own workspace
+    // ============================================================================
+    struct ThreadLocalData
+    {
+        // Current simulation path (mutable during descent)
+        std::vector<std::pair<uint32_t, uint16_t>> currentPath;
+
+        // Local batch of completed simulations waiting for inference
+        std::vector<SimulationResult> localBatch;
+        uint32_t localBatchCapacity;
+
+        // Temporary buffers for single simulation
+        AlignedVec<Action> validActionsBuf;
+        AlignedVec<float> policyBuf;
+        AlignedVec<float> valuesBuf;
+        AlignedVec<IdxStateAction> historyBuf;
+
+        // Node recycling
+        AlignedVec<uint32_t> localFreeNodes;
+        static constexpr size_t kLocalCacheSize = 128;
+
+        ThreadLocalData(size_t maxDepth, uint32_t batchCapacity, uint8_t historySize)
+            : localBatchCapacity(batchCapacity)
+            , validActionsBuf(reserve_only, GT::kMaxValidActions)
+            , policyBuf(reserve_only, GT::kActionSpace, GT::kActionSpace)
+            , valuesBuf(reserve_only, kNumPlayers, kNumPlayers)
+            , historyBuf(reserve_only, historySize)
+            , localFreeNodes(reserve_only, kLocalCacheSize)
+        {
+            currentPath.reserve(maxDepth);
+            localBatch.reserve(batchCapacity);
+        }
+
+        void reset() {
+            currentPath.clear();
+            localBatch.clear();
+        }
+    };
+
+    friend class MCTSThreadPool<GameTag>;
+
+    // ============================================================================
+    // MEMBER VARIABLES
+    // ============================================================================
+
+    std::shared_ptr<IEngine<GameTag>> m_engine;
 
     // Parameters
-    const uint8_t  m_numPlayers;
-    const uint16_t m_maxValidActions;
-    const uint16_t m_maxChildren;
-
     const uint32_t m_maxNodes;
-    const uint8_t  m_numBeliefSamples;
-    const float    m_cPUCT;
-	const uint16_t m_keepK;
+    const uint16_t m_maxChildren;
+    const float m_cPUCT;
+    const float m_virtualLoss;
+    const uint16_t m_keepK;
+    const uint8_t m_historySize;
     const uint16_t m_maxDepth;
 
-    std::shared_ptr<IEngine<GameTag>>   m_engine;
-	std::shared_ptr<NeuralNet<GameTag>> m_neuralNet;
+    // Node storage (Structure of Arrays for cache efficiency)
+    AlignedVec<Node> m_nodes;
+    AlignedVec<ObsState> m_states;
 
-    AlignedVec<Node>               m_nodes;
-    AlignedVec<ObsStateT<GameTag>> m_states;
+    // Child data (grouped by slot for better cache locality)
+    AlignedVec<std::atomic<uint32_t>> m_childNodeIdx;
+    AlignedVec<std::atomic<Action>> m_childAction;
+    AlignedVec<std::atomic<float>> m_childPrior;
+    AlignedVec<std::atomic<uint32_t>> m_childN;
+    AlignedVec<std::atomic<float>> m_childW; // [slot * kNumPlayers + player]
 
-    uint32_t m_rootIdx = UINT32_MAX;                        // current root index
+    // Root state
+    std::atomic<uint32_t> m_rootIdx{ UINT32_MAX };
 
-    AlignedVec<float>            m_valuesBuf;               // values for every players at the leaf
-    AlignedVec<float>            m_policyBuf;               // policy at the leaf
-    AlignedVec<float>            m_beliefBuf;               // buffer for belief probabilities
-	AlignedVec<std::pair
-        <ObsStateT<GameTag>, float>> m_beliefSamplesBuf;    // { states, weights }
-    AlignedVec<ActionT<GameTag>> m_validActionsBuf;         // valid actions at the leaf
-    AlignedVec<IdxActionT>       m_validIdxActionsBuf;      // for direct mapping to policy
-	IdxStateT<GameTag>           m_idxStateBuf;             // idx state for neural net input
+    // Root history (thread-safe: only modified between searches)
+    std::mutex m_rootHistMtx;
+    AlignedVec<IdxStateAction> m_rootIdxHist;
+    AlignedVec<IdxStateAction> m_cachedRootHist; // Read-only during search
 
-    AlignedVec<uint32_t> m_freeStack;                       // free node indices
-    AlignedVec<uint32_t> m_stack;                           // for subtree freeing
+    // Free node pool (striped for reduced contention)
+    static constexpr size_t kNumStripes = 8;
+    struct FreeStripe {
+        std::mutex mtx;
+        AlignedVec<uint32_t> nodes;
+        char padding[64]; // Cache line padding
+    };
+    std::array<FreeStripe, kNumStripes> m_freeStripes;
 
-    struct Candidate { uint16_t slot; uint32_t child; uint32_t visits; };
-    AlignedVec<Candidate> m_candGCPrune;
-
-	AlignedVec<std::pair
-        <uint32_t, uint32_t>> m_selectPath;                 // nodeIdx, childSlot for backpropagation
+    // Search control
+    std::atomic<uint32_t> m_simulationCount{ 0 };
+    std::atomic<uint32_t> m_targetSimulations{ 0 };
+    std::atomic<bool> m_searchActive{ false };
 
 private:
-    uint32_t allocNode()
-    {
-        if (m_freeStack.empty()) return UINT32_MAX;
-        uint32_t idx = m_freeStack.pop_back_value();
-        Node& newNode = m_nodes[idx];
-        newNode.reset();
-        return idx;
-    }
+    // ============================================================================
+    // NODE ALLOCATION - Lock-free fast path with striped fallback
+    // ============================================================================
 
-	// move last child to slot (to keep the array compact)
-    void removeChildCompact(uint32_t pIdx, uint16_t slot)
-    {
-        Node& pNode = m_nodes[pIdx];
-
-        if (pNode.childCount <= 1)
-            throw std::runtime_error("MCTS::removeChildCompact: parent has zero/one children");
-
-        const uint16_t lastSlot = pNode.childCount - 1;
-        const uint32_t from = pNode.childOffset + lastSlot;
-        const uint32_t to = pNode.childOffset + slot;
-
-        const uint32_t delChildNodeIdx = m_childNodeIdx[to];
-        const uint32_t lastChildNodeIdx = m_childNodeIdx[from];
-
-        // If the slot to remove is not the last one, move the last slot into slot
-        if (slot != lastSlot)
-        {
-			// move child info
-            m_childNodeIdx[to] = lastChildNodeIdx;
-            m_childAction[to] = std::move(m_childAction[from]);
-            m_childPrior[to] = m_childPrior[from];
-            m_childN[to] = m_childN[from];
-
-            for (uint8_t p = 0; p < m_numPlayers; ++p)
-                m_childW[to * m_numPlayers + p] = m_childW[from * m_numPlayers + p];
+    uint32_t allocNode(ThreadLocalData& tld) {
+        // Fast path: use local cache
+        if (!tld.localFreeNodes.empty()) {
+            uint32_t idx = tld.localFreeNodes.back();
+            tld.localFreeNodes.pop_back();
+            m_nodes[idx].reset();
+            return idx;
         }
 
-        // Free the removed child node index
-        m_freeStack.push_back(delChildNodeIdx);
-        pNode.childCount--;
-    }
+        // Slow path: refill from global stripes
+        size_t stripe = std::hash<std::thread::id>{}(std::this_thread::get_id()) % kNumStripes;
 
-    // free subtree from pIdx
-    void freeSubtreeChildren(uint32_t pIdx)
-    {
-        Node& pNode = m_nodes[pIdx];
-        if (pNode.childCount == 0) return;
+        for (size_t attempt = 0; attempt < kNumStripes; ++attempt) {
+            auto& s = m_freeStripes[(stripe + attempt) % kNumStripes];
+            std::lock_guard<std::mutex> lock(s.mtx);
 
-        m_stack.clear();
-
-		// stack children of pIdx
-        const uint32_t base = pNode.childOffset;
-        for (uint16_t slot = 0; slot < pNode.childCount; ++slot)
-        {
-            uint32_t childIdx = m_childNodeIdx[base + slot];
-            m_stack.push_back(childIdx);
-        }
-
-		// reset parent node
-        pNode.childCount = 0;
-        pNode.setExpanded(false);
-
-		// free all children in the stack
-        while (!m_stack.empty())
-        {
-            uint32_t idx = m_stack.pop_back_value();
-            Node& node = m_nodes[idx];
-
-            const uint32_t baseChild = node.childOffset;
-            for (uint16_t slot = 0; slot < node.childCount; ++slot)
-            {
-                uint32_t childIdx = m_childNodeIdx[baseChild + slot];
-                m_stack.push_back(childIdx);
+            if (!s.nodes.empty()) {
+                // Bulk refill for amortization
+                size_t toTake = std::min<size_t>(64, s.nodes.size());
+                for (size_t i = 1; i < toTake; ++i) {
+                    tld.localFreeNodes.push_back(s.nodes.back());
+                    s.nodes.pop_back();
+                }
+                uint32_t idx = s.nodes.back();
+                s.nodes.pop_back();
+                m_nodes[idx].reset();
+                return idx;
             }
-            node.reset();
-            m_freeStack.push_back(idx);
-        }
-    }
-
-    void gcPruneFromRoot(uint32_t keepK)
-    {
-        Node& rootNode = m_nodes[m_rootIdx];
-        if (rootNode.childCount <= keepK) return;
-
-        const uint32_t base = rootNode.childOffset;
-
-        m_candGCPrune.clear();
-        // build candidates with correct visit counts (use slot-indexed m_childN)
-        for (uint16_t slot = 0; slot < rootNode.childCount; ++slot)
-        {
-            uint32_t childNodeIdx = m_childNodeIdx[base + slot];
-            if (m_nodes[childNodeIdx].isPinned()) continue; // never prune pinned nodes
-            uint32_t visits = m_childN[base + slot]; // <-- use slot-based index
-            m_candGCPrune.push_back({ slot, childNodeIdx, visits });
         }
 
-        if (m_candGCPrune.size() <= keepK) return;
+        return UINT32_MAX; // OOM - need GC
+    }
 
-        // Partition so first keepK elements are the best (by visits)
-        std::nth_element(
-            m_candGCPrune.begin(),
-            m_candGCPrune.begin() + keepK,
-            m_candGCPrune.end(),
-            [](const Candidate& a, const Candidate& b) { return a.visits > b.visits; }
-        );
+    void freeNodeGlobal(uint32_t idx) {
+        if (idx == UINT32_MAX || idx >= m_maxNodes) return;
 
-        // Build a list of slots to REMOVE (those not in first keepK)
-        std::vector<uint16_t> slotsToRemove;
-        slotsToRemove.reserve(m_candGCPrune.size() - keepK);
-        for (size_t i = keepK; i < m_candGCPrune.size(); ++i)
-            slotsToRemove.push_back(m_candGCPrune[i].slot);
+        // On ne peut pas connaître l'ID du thread, donc on choisit un stripe
+        // (par exemple, basé sur l'idx)
+        size_t stripe = idx % kNumStripes;
+        auto& s = m_freeStripes[stripe];
 
-        // Important: remove in descending order of slot, so removeChildCompact's swap
-        // doesn't change the meaning of slots we still need to remove.
-        std::sort(slotsToRemove.begin(), slotsToRemove.end(), std::greater<uint16_t>());
+        std::lock_guard<std::mutex> lock(s.mtx);
+        s.nodes.push_back(idx);
+    }
 
-        for (uint16_t slot : slotsToRemove)
-        {
-            uint32_t slotIdx = base + slot;
-            uint32_t delChildIdx = m_childNodeIdx[slotIdx];
+    void freeNode(uint32_t idx, ThreadLocalData& tld) {
+        if (idx == UINT32_MAX || idx >= m_maxNodes) return;
 
-            // free subtree for that child node
-            if (delChildIdx != UINT32_MAX)
-                freeSubtreeChildren(delChildIdx);
-
-            // remove the child slot (this will compact the array)
-            removeChildCompact(m_rootIdx, slot);
+        // Add to local cache
+        if (tld.localFreeNodes.size() < ThreadLocalData::kLocalCacheSize) {
+            tld.localFreeNodes.push_back(idx);
+            return;
         }
+
+        // Flush half to global stripe
+        size_t stripe = std::hash<std::thread::id>{}(std::this_thread::get_id()) % kNumStripes;
+        auto& s = m_freeStripes[stripe];
+
+        std::lock_guard<std::mutex> lock(s.mtx);
+        size_t toFlush = tld.localFreeNodes.size() / 2;
+        s.nodes.insert(s.nodes.end(),
+            tld.localFreeNodes.end() - toFlush,
+            tld.localFreeNodes.end());
+        tld.localFreeNodes.resize(tld.localFreeNodes.size() - toFlush);
+        tld.localFreeNodes.push_back(idx);
     }
 
-    void ensureCapacityOrPrune()
-    {
-        if (m_freeStack.empty() && m_rootIdx != UINT32_MAX)
-            gcPruneFromRoot(m_keepK);
-    }
+    // ============================================================================
+    // TREE TRAVERSAL - Select child using UCB with virtual loss
+    // ============================================================================
 
-    // selectPUCT (returns UINT32_MAX if no selectable child)
-    uint32_t selectPUCT(uint32_t pIdx)
-    {
-        Node& pNode = m_nodes[pIdx];
-        const uint32_t base = pNode.childOffset;
+    uint32_t selectChild(uint32_t nodeIdx, const ObsState& nodeState, ThreadLocalData& tld) {
+        Node& node = m_nodes[nodeIdx];
+        uint32_t base = node.childOffset.load(std::memory_order_acquire);
+        uint16_t count = node.childCount.load(std::memory_order_acquire);
 
-        // compute sum of child visits
+        if (count == 0) {
+            std::cerr << "ERROR: selectChild called on node with 0 children (node=" << nodeIdx << ")" << std::endl;
+            return UINT32_MAX;
+        }
+
+        uint8_t curPlayer = m_engine->getCurrentPlayer(nodeState);
+
+        // Compute sqrt(sum(N)) for UCB
         uint32_t sumN = 0;
-        for (uint16_t i = 0; i < pNode.childCount; ++i)
-            sumN += m_childN[base + i];
-        const float sqrtSumN = std::sqrt(static_cast<float>(std::max<uint32_t>(1u, sumN)));
+        for (uint16_t i = 0; i < count; ++i) {
+            sumN += m_childN[base + i].load(std::memory_order_acquire);
+        }
+        float sqrtSumN = std::sqrt(static_cast<float>(std::max(1u, sumN)));
 
+        // Find best child via UCB
         float bestScore = -std::numeric_limits<float>::infinity();
         uint16_t bestSlot = UINT16_MAX;
 
-        const uint8_t curPlayer = m_engine->getCurrentPlayer(m_states[pIdx]);
+        for (uint16_t slot = 0; slot < count; ++slot) {
+            uint32_t slotIdx = base + slot;
 
-        // iterate children
-        for (uint16_t slot = 0; slot < pNode.childCount; ++slot)
-        {
-            const uint32_t slotIdx = base + slot;
-
-            uint32_t childNodeIdx = m_childNodeIdx[slotIdx];
-            if (childNodeIdx != UINT32_MAX)
-            {
-                if (m_nodes[childNodeIdx].isPinned())
-                    continue;
+            uint32_t childIdx = m_childNodeIdx[slotIdx].load(std::memory_order_acquire);
+            if (childIdx == UINT32_MAX) {
+                continue; // Skip invalid children
             }
 
-            const float N = static_cast<float>(m_childN[slotIdx]);
-            const float Qp = (N > 0.f) ? (m_childW[static_cast<size_t>(slotIdx) * m_numPlayers + curPlayer] / N) : 0.f;
-            const float U = m_cPUCT * m_childPrior[slotIdx] * (sqrtSumN / (1.f + N));
-            const float S = Qp + U;
+            float N = static_cast<float>(m_childN[slotIdx].load(std::memory_order_acquire));
+            float W = m_childW[slotIdx * kNumPlayers + curPlayer].load(std::memory_order_acquire);
+            float Q = (N > 0.5f) ? (W / N) : 0.0f;
+            float prior = m_childPrior[slotIdx].load(std::memory_order_acquire);
+            float U = m_cPUCT * prior * sqrtSumN / (1.0f + N);
+            float score = Q + U;
 
-            if (S > bestScore)
-            {
-                bestScore = S;
+            if (score > bestScore) {
+                bestScore = score;
                 bestSlot = slot;
             }
         }
 
-        if (bestSlot == UINT16_MAX)
-            return UINT32_MAX; // no selectable child found
+        if (bestSlot == UINT16_MAX) {
+            std::cerr << "ERROR: No valid child found in selectChild (node=" << nodeIdx << ", count=" << count << ")" << std::endl;
+            return UINT32_MAX;
+        }
 
-        const uint32_t bestSlotIdx = base + bestSlot;
-        m_selectPath.push_back({ pIdx, bestSlot });
+        // Record in path BEFORE applying virtual loss
+        tld.currentPath.push_back({ nodeIdx, bestSlot });
 
-        return m_childNodeIdx[bestSlotIdx];
+        // Apply virtual loss (atomic operations)
+        uint32_t slotIdx = base + bestSlot;
+        m_childN[slotIdx].fetch_add(1u, std::memory_order_acq_rel);
+        m_childW[slotIdx * kNumPlayers + curPlayer].fetch_sub(m_virtualLoss, std::memory_order_acq_rel);
+
+        uint32_t selectedChild = m_childNodeIdx[slotIdx].load(std::memory_order_acquire);
+        return selectedChild;
     }
 
-    void topKFromBelief(const ObsStateT<GameTag>& state)
-    {
-		m_beliefSamplesBuf.push_back({ state, 1.0f });
+    // ============================================================================
+    // EXPANSION - Create children for a leaf node
+    // ============================================================================
+
+    bool expandNode(uint32_t nodeIdx, ObsState& nodeState, ThreadLocalData& tld) {
+        Node& node = m_nodes[nodeIdx];
+
+        // Check terminal
+        tld.valuesBuf.clear();
+        tld.valuesBuf.resize(kNumPlayers);
+        if (m_engine->isTerminal(nodeState, tld.valuesBuf)) {
+            node.setTerminal();
+            node.setExpanded();
+            return true; // Terminal
+        }
+
+        // Get valid actions
+        tld.validActionsBuf.clear();
+        m_engine->getValidActions(nodeState, tld.validActionsBuf);
+
+        if (tld.validActionsBuf.empty()) {
+            node.setTerminal();
+            node.setExpanded();
+            m_engine->isTerminal(nodeState, tld.valuesBuf);
+            return true; // Terminal
+        }
+
+        uint16_t numActions = static_cast<uint16_t>(
+            std::min<size_t>(tld.validActionsBuf.size(), m_maxChildren));
+        uint32_t base = nodeIdx * m_maxChildren;
+
+        // Allocate and initialize children
+        uint16_t allocated = 0;
+        for (uint16_t slot = 0; slot < numActions; ++slot) {
+            uint32_t childIdx = allocNode(tld);
+
+            if (childIdx == UINT32_MAX) {
+                // OOM - mark remaining as invalid
+                for (uint16_t i = slot; i < numActions; ++i) {
+                    m_childNodeIdx[base + i].store(UINT32_MAX, std::memory_order_release);
+                }
+                break;
+            }
+
+            // Create child state
+            ObsState childState = nodeState;
+            m_engine->applyAction(tld.validActionsBuf[slot], childState);
+
+            uint32_t slotIdx = base + slot;
+
+            // Initialize child data BEFORE publishing index
+            m_states[childIdx] = childState;
+            m_nodes[childIdx].parentIdx.store(nodeIdx, std::memory_order_release);
+
+            m_childAction[slotIdx].store(tld.validActionsBuf[slot], std::memory_order_release);
+
+            float uniformPrior = 1.0f / numActions;
+            m_childPrior[slotIdx].store(uniformPrior, std::memory_order_release);
+            m_childN[slotIdx].store(0u, std::memory_order_release);
+
+            for (uint8_t p = 0; p < kNumPlayers; ++p) {
+                m_childW[slotIdx * kNumPlayers + p].store(0.0f, std::memory_order_release);
+            }
+
+            // Publish child index LAST (acts as memory barrier)
+            m_childNodeIdx[slotIdx].store(childIdx, std::memory_order_release);
+            allocated++;
+        }
+
+        node.childOffset.store(base, std::memory_order_release);
+        node.childCount.store(allocated, std::memory_order_release);
+        node.setExpanded();
+
+        return false;
     }
 
-    // expands node pIdx by generating (action x K) child samples, batching NN forwards
-    void expand(uint32_t pIdx)
-    {
-        Node& pNode = m_nodes[pIdx];
-        const ObsStateT<GameTag>& pState = m_states[pIdx];
+    // ============================================================================
+    // HISTORY BUILDING - Prepare input for neural network
+    // ============================================================================
 
-        m_valuesBuf.reset(); // reuse for parent value fetch
+    void buildHistory(const ThreadLocalData& tld, AlignedVec<IdxStateAction>& outHistory) {
+        outHistory.clear();
 
-        if (pNode.isExpanded()) return;
-        if (m_engine->isTerminal(pState, m_valuesBuf))
-        {
-            pNode.setExpanded(true);
-            return;
-        }
+        size_t pathSize = tld.currentPath.size();
+        size_t pathToUse = std::min<size_t>(pathSize, m_historySize);
+        size_t rootToUse = std::min<size_t>(m_cachedRootHist.size(), m_historySize - pathToUse);
 
-        // get valid actions from parent observed state
-        m_validActionsBuf.clear();
-        m_engine->getValidActions(pState, m_validActionsBuf);
-        const uint16_t m = static_cast<uint16_t>(m_validActionsBuf.size());
-        if (m == 0)
-        {
-            pNode.setExpanded(true);
-            return;
-        }
+        // Add path actions (most recent first)
+        for (size_t i = 0; i < pathToUse; ++i) {
+            auto [nodeIdx, childSlot] = tld.currentPath[pathSize - 1 - i];
 
-        // Sanity: ensure node arrays can hold at most m * K children for this node
-        const uint16_t K = m_numBeliefSamples;
-        const size_t maxNeededChildren = static_cast<size_t>(m) * static_cast<size_t>(K);
-        if (maxNeededChildren > m_maxChildren)
-            throw std::runtime_error("MCTS::expand(): m_maxChildren too small for m * K");
-
-        // quick capacity check for node allocation
-        if (m_freeStack.size() < maxNeededChildren)
-            return; // not enough free node indices -> abort expansion (do not mark expanded)
-
-        // parent forward (policy + value + belief)
-        m_engine->obsToIdx(pState, m_idxStateBuf);
-        m_neuralNet->forward(m_idxStateBuf, m_policyBuf.data(), m_valuesBuf.data(), m_beliefBuf.data());
-
-        // normalize policy restricted to valid actions
-        m_validIdxActionsBuf.reset();
-        for (uint16_t slot = 0; slot < m; ++slot)
-            m_engine->actionToIdx(m_validActionsBuf[slot], m_validIdxActionsBuf[slot]);
-        m_neuralNet->normalizeToProba(m_validIdxActionsBuf, m_policyBuf.data());
-
-        // compute base offset in child arrays for this node
-        const uint32_t base = static_cast<uint32_t>(pIdx) * static_cast<uint32_t>(m_maxChildren);
-        pNode.childOffset = base; // fixed slot region for this node
-        uint16_t totalSamples = 0; // number of child slots actually used
-
-        // For each action, sample belief states and create children sequentially in child array
-        for (uint16_t slot = 0; slot < m; ++slot)
-        {
-            // compute action prior (scalar) from parent's policy
-            const float actionPrior = m_policyBuf[m_validIdxActionsBuf[slot].factIdx];
-
-            // after applying action to public part only, we sample beliefs for next player
-            ObsStateT<GameTag> afterActionState = pState;
-            m_engine->applyAction(m_validActionsBuf[slot], afterActionState);
-
-            // get up to K samples (ObsState, rawWeight) for this action
-            m_beliefSamplesBuf.clear();
-            topKFromBelief(afterActionState);
-            size_t produced = m_beliefSamplesBuf.size();
-            if (produced == 0)
-                throw std::runtime_error("MCTS::expand(): topKFromBelief returned no samples");
-
-            // normalize the returned raw weights for this action
-            double sumW = 0.0;
-            for (size_t i = 0; i < produced; ++i) sumW += static_cast<double>(m_beliefSamplesBuf[i].second);
-
-            if (sumW <= 0.0)
-            {
-                // fallback: uniform weights across produced samples
-                for (size_t i = 0; i < produced; ++i) m_beliefSamplesBuf[i].second = 1.0f / static_cast<float>(produced);
-            }
-            else
-            {
-                for (size_t i = 0; i < produced; ++i)
-                    m_beliefSamplesBuf[i].second = static_cast<float>(m_beliefSamplesBuf[i].second / static_cast<float>(sumW));
+            if (nodeIdx >= m_maxNodes) {
+                std::cerr << "ERROR: Invalid nodeIdx in buildHistory: " << nodeIdx << std::endl;
+                continue; // Ignorer cette partie du chemin
             }
 
-            // create child entries for each produced sample
-            for (size_t s = 0; s < produced; ++s)
-            {
-                // global slot in child arrays for this new child
-                const uint32_t childSlot = base + static_cast<uint32_t>(totalSamples);
-                if (childSlot >= (m_nodes.size() * m_maxChildren))
-                    throw std::out_of_range("MCTS::expand(): childSlot out of range");
-
-                // allocate a child node index from node pool
-                uint32_t newChildIdx = allocNode();
-
-                // write the sampled observed-state into the node's state
-                m_states[newChildIdx] = m_beliefSamplesBuf[s].first;
-                m_nodes[newChildIdx].parentIdx = pIdx;
-
-                // fill AoS arrays at childSlot
-                m_childNodeIdx[childSlot] = newChildIdx;
-                m_childAction[childSlot] = m_validActionsBuf[slot];
-                m_childN[childSlot] = 0u;
-                m_childPrior[childSlot] = actionPrior * m_beliefSamplesBuf[s].second;
-
-                // initialize W (per-player) to zero: children don't have evaluated values yet
-                const size_t wDst = static_cast<size_t>(childSlot) * static_cast<size_t>(m_numPlayers);
-                for (uint8_t pl = 0; pl < m_numPlayers; ++pl)
-                    m_childW[wDst + pl] = 0.0f;
-
-                ++totalSamples;
-                // safety: do not exceed node's max child capacity
-                if (totalSamples > m_maxChildren)
-                    throw std::runtime_error("MCTS::expand(): totalSamples exceeded m_maxChildren for node");
+            Node& node = m_nodes[nodeIdx];
+            // CRITICAL FIX: Validate node is still valid
+            uint32_t base = node.childOffset.load(std::memory_order_acquire);
+            if (base == UINT32_MAX || childSlot >= node.childCount.load(std::memory_order_acquire)) {
+                std::cerr << "WARNING: Invalid child in buildHistory, skipping" << std::endl;
+                continue;
             }
+            // Make atomic copy of state to prevent races
+            ObsState localState = m_states[nodeIdx];
+            std::atomic_thread_fence(std::memory_order_acquire);
+
+            uint32_t slotIdx = base + childSlot;
+
+            IdxStateAction sa;
+            m_engine->obsToIdx(localState, sa.state);
+
+            Action tempAction = m_childAction[slotIdx].load(std::memory_order_acquire);
+            m_engine->actionToIdx(tempAction, sa.lastAction);
+
+            outHistory.push_back(sa);
         }
-        // finalize parent node
-        pNode.childCount = totalSamples;
-        pNode.setExpanded(true);
+
+        // Add root history
+        outHistory.insert(outHistory.end(),
+            m_cachedRootHist.begin(),
+            m_cachedRootHist.begin() + rootToUse);
+
+        // Pad with nulls
+        if (outHistory.size() < m_historySize) {
+            IdxStateAction nullSA;
+            std::memset(&nullSA, 0, sizeof(IdxStateAction));
+            outHistory.resize(m_historySize, nullSA);
+        }
     }
 
-	// backprop values from leafNodeIdx up to root
-    void backprop(uint32_t leafNodeIdx)
-    {
-        if (leafNodeIdx != UINT32_MAX)
-        {
-            m_nodes[leafNodeIdx].setPinned(false);
-        }
+    // ============================================================================
+    // BACKPROPAGATION - Update tree statistics
+    // ============================================================================
 
-        // Walk the selection path in reverse
-        for (int i = static_cast<int>(m_selectPath.size()) - 1; i >= 0; --i)
-        {
-            const auto& entry = m_selectPath[i];
-            const uint32_t pIdx = entry.first;
-            const uint16_t slot = entry.second;
+    void backpropagate(const SimulationResult& sim, const AlignedVec<float>& values) {
+        // No need to unpin leaf - we removed pinning
 
-            if (pIdx == UINT32_MAX) continue;
-            Node& pNode = m_nodes[pIdx];
-            const uint32_t slotIdx = pNode.childOffset + static_cast<uint32_t>(slot);
+        // Walk path from leaf to root
+        for (int i = static_cast<int>(sim.pathCopy.size()) - 1; i >= 0; --i) {
+            auto [parentIdx, slot] = sim.pathCopy[i];
 
-            if (slotIdx >= m_childNodeIdx.size())
-                throw std::out_of_range("MCTS::backprop: slotIdx out of range");
-
-            ++m_childN[slotIdx];
-            const uint32_t base = static_cast<uint32_t>(slotIdx) * static_cast<uint32_t>(m_numPlayers);
-            for (uint8_t p = 0; p < m_numPlayers; ++p)
-            {
-                m_childW[base + p] += m_valuesBuf[p];
+            if (parentIdx >= m_maxNodes) {
+                std::cerr << "ERROR: Invalid parentIdx in backprop: " << parentIdx << std::endl;
+                continue;
             }
 
-            const uint32_t childNodeIdx = m_childNodeIdx[slotIdx];
-            if (childNodeIdx != UINT32_MAX)
-            {
-                m_nodes[childNodeIdx].setPinned(false);
+            Node& parent = m_nodes[parentIdx];
+            uint32_t base = parent.childOffset.load(std::memory_order_acquire);
+
+            if (base == UINT32_MAX) {
+                // On saute silencieusement. C'est normal si le reroot
+                // a libéré ce nœud.
+                continue;
             }
-            else
-            {
-                pNode.setPinned(false);
+
+            uint32_t slotIdx = base + slot;
+
+            // Revert virtual loss and add real value
+            // We did: N += 1, W -= vl during selection
+            // Now do: W += (value + vl) so net effect is W += value
+            for (uint8_t p = 0; p < kNumPlayers; ++p) {
+                float delta = values[p] + m_virtualLoss;
+                m_childW[slotIdx * kNumPlayers + p].fetch_add(delta, std::memory_order_acq_rel);
             }
         }
-        m_selectPath.clear();
     }
 
-    // iterateOnce (selection handles UINT32_MAX)
-    void iterateOnce()
-    {
-		uint32_t curIdx = m_rootIdx;
-        m_nodes[curIdx].setPinned(true);
-        while (m_nodes[curIdx].isExpanded())
-        {
-            uint32_t childIdx = selectPUCT(curIdx);
-            if (childIdx == UINT32_MAX) break; // treat childNodeIdx as leaf
-            m_nodes[childIdx].setPinned(true);
-            curIdx = childIdx;
+    // ============================================================================
+    // GARBAGE COLLECTION - Prune subtrees to reclaim memory
+    // ============================================================================
+
+    void freeSubtree(uint32_t nodeIdx) {
+        if (nodeIdx == UINT32_MAX || nodeIdx >= m_maxNodes) return;
+
+        AlignedVec<uint32_t> stack;
+        stack.reserve(256);
+        stack.push_back(nodeIdx);
+
+        while (!stack.empty()) {
+            uint32_t idx = stack.back();
+            stack.pop_back();
+
+            Node& node = m_nodes[idx];
+            uint32_t base = node.childOffset.load(std::memory_order_acquire);
+            uint16_t count = node.childCount.load(std::memory_order_acquire);
+
+            // Collect children
+            for (uint16_t i = 0; i < count; ++i) {
+                uint32_t childIdx = m_childNodeIdx[base + i].load(std::memory_order_acquire);
+                if (childIdx != UINT32_MAX && childIdx < m_maxNodes) {
+                    stack.push_back(childIdx);
+                    m_childNodeIdx[base + i].store(UINT32_MAX, std::memory_order_release);
+                }
+            }
+
+            node.reset();
+            freeNodeGlobal(idx);
         }
-        expand(curIdx);
-        backprop(curIdx);
+    }
+
+    void pruneRoot(ThreadLocalData& tld) {
+        /*
+        uint32_t rootIdx = m_rootIdx.load(std::memory_order_acquire);
+        if (rootIdx == UINT32_MAX || rootIdx >= m_maxNodes) return;
+
+        Node& root = m_nodes[rootIdx];
+        uint16_t childCount = root.childCount.load(std::memory_order_acquire);
+        if (childCount <= m_keepK) return;
+
+        uint32_t base = root.childOffset.load(std::memory_order_acquire);
+
+        // Build sorted list of children by visit count
+        struct Candidate { uint16_t slot; uint32_t visits; };
+        std::vector<Candidate> candidates;
+        candidates.reserve(childCount);
+
+        for (uint16_t slot = 0; slot < childCount; ++slot) {
+            uint32_t childIdx = m_childNodeIdx[base + slot].load(std::memory_order_acquire);
+            if (childIdx == UINT32_MAX || m_nodes[childIdx].isPinned()) continue;
+
+            uint32_t visits = m_childN[base + slot].load(std::memory_order_acquire);
+            candidates.push_back({ slot, visits });
+        }
+
+        if (candidates.size() <= m_keepK) return;
+
+        // Partial sort to find top-K
+        std::nth_element(candidates.begin(),
+            candidates.begin() + m_keepK,
+            candidates.end(),
+            [](const Candidate& a, const Candidate& b) { return a.visits > b.visits; });
+
+        // Free bottom candidates
+        for (size_t i = m_keepK; i < candidates.size(); ++i) {
+            uint16_t slot = candidates[i].slot;
+            uint32_t childIdx = m_childNodeIdx[base + slot].load(std::memory_order_acquire);
+            if (childIdx != UINT32_MAX) {
+                freeSubtree(childIdx, tld);
+            }
+        }
+        */
     }
 
 public:
+    // ============================================================================
+    // CONSTRUCTOR
+    // ============================================================================
+
     MCTS(std::shared_ptr<IEngine<GameTag>> engine,
-        std::shared_ptr<NeuralNet<GameTag>> neuralNet,
-        uint8_t numPlayers, uint16_t maxValidActions, uint16_t actionSpaceSize, uint32_t maxNodes, uint8_t numBeliefSamples, float cPUCT, uint16_t keepK, uint16_t maxDepth)
-        : m_engine(std::move(engine)), m_neuralNet(std::move(neuralNet)),
-        m_numPlayers(numPlayers),
-        m_maxValidActions(maxValidActions),
-        m_maxChildren(maxValidActions * numBeliefSamples),
-        m_maxNodes(maxNodes),
-        m_numBeliefSamples(numBeliefSamples),
-        m_cPUCT(cPUCT),
-        m_keepK(keepK),
-		m_maxDepth(maxDepth),
-        m_nodes(maxNodes),
-        m_states(maxNodes),
-        m_childNodeIdx(maxNodes * maxValidActions * numBeliefSamples, UINT32_MAX),
-        m_childAction(maxNodes * maxValidActions * numBeliefSamples),
-		m_childPrior(maxNodes * maxValidActions * numBeliefSamples),
-		m_childN(maxNodes * maxValidActions * numBeliefSamples),
-		m_childW(maxNodes * maxValidActions * numBeliefSamples * numPlayers),
-        m_policyBuf(actionSpaceSize),
-        m_valuesBuf(numPlayers),
-        m_beliefBuf(GameTraits<GameTag>::kNumElems * GameTraits<GameTag>::kNumPrivatePos),
-		m_beliefSamplesBuf(reserve_only, numBeliefSamples),
-        m_validActionsBuf(reserve_only, maxValidActions),
-        m_validIdxActionsBuf(maxValidActions),
-        m_freeStack(reserve_only, maxNodes),
-        m_stack(reserve_only, maxNodes),
-		m_selectPath(maxDepth + 1)
+        uint32_t maxNodes,
+        uint8_t historySize,
+        uint16_t maxDepth,
+        float cPUCT,
+        float virtualLoss,
+        uint16_t keepK)
+        : m_engine(std::move(engine))
+        , m_maxNodes(maxNodes)
+        , m_maxChildren(GT::kMaxValidActions)
+        , m_cPUCT(cPUCT)
+        , m_virtualLoss(virtualLoss)
+        , m_keepK(keepK)
+        , m_historySize(historySize)
+        , m_maxDepth(maxDepth)
+        , m_nodes(maxNodes)
+        , m_states(maxNodes)
+        , m_childNodeIdx(maxNodes* m_maxChildren)
+        , m_childAction(maxNodes* m_maxChildren)
+        , m_childPrior(maxNodes* m_maxChildren)
+        , m_childN(maxNodes* m_maxChildren)
+        , m_childW(maxNodes* m_maxChildren* kNumPlayers)
+        , m_rootIdxHist(reserve_only, historySize)
     {
-        for (uint32_t i = 0; i < m_maxNodes; ++i) m_freeStack.push_back(i);
-    }
-    MCTS(const MCTS&) = delete;
-    MCTS& operator=(const MCTS&) = delete;
-
-    MCTS(MCTS&&) noexcept = default;
-    MCTS& operator=(MCTS&&) noexcept = default;
-
-    // Démarrer une recherche sur un état racine
-    void startSearch(const ObsStateT<GameTag>& rootState)
-    {
-        m_rootIdx = allocNode();
-        if (m_rootIdx == UINT32_MAX)
-        {
-            throw std::runtime_error("No alloc at startSearch()");
-        }
-        m_states[m_rootIdx] = rootState;
-    }
-
-    // Lance K simulations avec GC si besoin
-    void run(uint32_t numSimulations)
-    {
-        for (uint32_t i = 0; i < numSimulations; ++i)
-        {
-            iterateOnce();
-        }
-    }
-
-    // bestActionFromRoot (if all visits 0, fall back on highest prior)
-    ActionT<GameTag> bestActionFromRoot() const
-    {
-        if (m_rootIdx == UINT32_MAX)
-            throw std::runtime_error("MCTS::bestActionFromRoot(): root not set");
-
-        const Node& root = m_nodes[m_rootIdx];
-        if (root.childCount == 0)
-            throw std::runtime_error("MCTS::bestActionFromRoot(): No child to choose");
-
-        const uint32_t base = root.childOffset;
-        if (base == UINT32_MAX)
-            throw std::runtime_error("MCTS::bestActionFromRoot(): invalid childOffset");
-
-        float bestP = -std::numeric_limits<float>::infinity();
-        uint32_t bestSlotIdx = UINT32_MAX;
-
-        for (uint16_t i = 0; i < root.childCount; ++i)
-        {
-            const uint32_t slotIdx = base + static_cast<uint32_t>(i);
-            if (slotIdx >= m_childPrior.size())
-                throw std::out_of_range("MCTS::bestActionFromRoot(): child slot out of range");
-
-            const float p = m_childPrior[slotIdx];
-            if (p > bestP)
-            {
-                bestP = p;
-                bestSlotIdx = slotIdx;
+        // Initialize free node stripes
+        size_t nodesPerStripe = (maxNodes + kNumStripes - 1) / kNumStripes;
+        for (size_t s = 0; s < kNumStripes; ++s) {
+            m_freeStripes[s].nodes.reserve(nodesPerStripe);
+            size_t start = s * nodesPerStripe;
+            size_t end = std::min<size_t>((s + 1) * nodesPerStripe, maxNodes);
+            for (size_t i = start; i < end; ++i) {
+                m_freeStripes[s].nodes.push_back(static_cast<uint32_t>(i));
             }
         }
 
-        if (bestSlotIdx == UINT32_MAX)
-            throw std::runtime_error("MCTS::bestActionFromRoot(): no selectable child found");
-
-        return m_childAction[bestSlotIdx];
+        // Initialize child arrays
+        for (size_t i = 0; i < m_childNodeIdx.size(); ++i) {
+            m_childNodeIdx[i].store(UINT32_MAX, std::memory_order_relaxed);
+            m_childPrior[i].store(0.0f, std::memory_order_relaxed);
+            m_childN[i].store(0u, std::memory_order_relaxed);
+            m_childAction[i].store(Action{}, std::memory_order_relaxed);
+        }
+        for (size_t i = 0; i < m_childW.size(); ++i) {
+            m_childW[i].store(0.0f, std::memory_order_relaxed);
+        }
     }
 
-	// Reroot by applying the played action to the current root
-    void rerootByPlayedAction(const ActionT<GameTag>& played)
-    {
-        if (m_rootIdx == UINT32_MAX) return;
+    ~MCTS() = default;
+    MCTS(const MCTS&) = delete;
+    MCTS& operator=(const MCTS&) = delete;
 
-        const uint32_t oldRoot = m_rootIdx;
-        Node& rootNode = m_nodes[oldRoot];
-        ObsStateT<GameTag>& rootState = m_states[oldRoot];
+    // ============================================================================
+    // PUBLIC INTERFACE
+    // ============================================================================
 
-        const uint32_t base = rootNode.childOffset;
+    void cacheRootHistory() {
+        std::lock_guard<std::mutex> lock(m_rootHistMtx);
+        m_cachedRootHist = m_rootIdxHist;
+    }
 
-        // find the slot corresponding to the played action
+    void startSearch(const ObsState& rootState) {
+        // Allocate root
+        uint32_t newRoot = UINT32_MAX;
+
+        // MODIFICATION : Essayer tous les stripes, pas seulement stripe 0
+        for (size_t attempt = 0; attempt < kNumStripes; ++attempt) {
+            auto& s = m_freeStripes[attempt];
+            std::lock_guard<std::mutex> lock(s.mtx);
+            if (!s.nodes.empty()) {
+                newRoot = s.nodes.back();
+                s.nodes.pop_back();
+                break; // Nœud trouvé
+            }
+        }
+
+        if (newRoot == UINT32_MAX) {
+            // C'est une vraie erreur OOM
+            throw std::runtime_error("No nodes available for root");
+        }
+
+        m_nodes[newRoot].reset();
+        m_states[newRoot] = rootState;
+
+        // CRITICAL: Expand root immediately before search starts
+        // This prevents all threads from trying to expand it simultaneously
+        auto tempTld = std::make_unique<ThreadLocalData>(m_maxDepth, 16, m_historySize);
+        ObsState rootStateCopy = rootState;
+
+        try {
+            bool isTerminal = expandNode(newRoot, rootStateCopy, *tempTld);
+            if (isTerminal) {
+                std::cerr << "WARNING: Root state is terminal!" << std::endl;
+            }
+
+            std::cout << "Root expanded with "
+                << m_nodes[newRoot].childCount.load(std::memory_order_acquire)
+                << " children" << std::endl;
+        }
+        catch (const std::exception& e) {
+            std::cerr << "ERROR expanding root: " << e.what() << std::endl;
+            throw;
+        }
+
+        m_rootIdx.store(newRoot, std::memory_order_release);
+        m_simulationCount.store(0u, std::memory_order_release);
+    }
+
+    void run(uint32_t numSimulations, MCTSThreadPool<GameTag>& pool);
+
+    void bestActionFromRoot(Action& out) const {
+        uint32_t rootIdx = m_rootIdx.load(std::memory_order_acquire);
+        if (rootIdx == UINT32_MAX) {
+            throw std::runtime_error("Root not set");
+        }
+
+        const Node& root = m_nodes[rootIdx];
+        uint16_t count = root.childCount.load(std::memory_order_acquire);
+        if (count == 0) {
+            throw std::runtime_error("No children at root");
+        }
+
+        uint32_t base = root.childOffset.load(std::memory_order_acquire);
+        uint32_t bestVisits = 0;
+        uint16_t bestSlot = 0;
+
+        for (uint16_t i = 0; i < count; ++i) {
+            uint32_t visits = m_childN[base + i].load(std::memory_order_acquire);
+            if (visits > bestVisits) {
+                bestVisits = visits;
+                bestSlot = i;
+            }
+        }
+
+        out = m_childAction[base + bestSlot].load(std::memory_order_relaxed);
+
+        // Debug output
+        static constexpr const char* kSquares[64] = {
+            "a1","b1","c1","d1","e1","f1","g1","h1",
+            "a2","b2","c2","d2","e2","f2","g2","h2",
+            "a3","b3","c3","d3","e3","f3","g3","h3",
+            "a4","b4","c4","d4","e4","f4","g4","h4",
+            "a5","b5","c5","d5","e5","f5","g5","h5",
+            "a6","b6","c6","d6","e6","f6","g6","h6",
+            "a7","b7","c7","d7","e7","f7","g7","h7",
+            "a8","b8","c8","d8","e8","f8","g8","h8"
+        };
+
+        ObsState localState = m_states[rootIdx];
+        uint8_t curPlayer = m_engine->getCurrentPlayer(localState);
+
+        std::cout << "\n=== Root Statistics ===" << std::endl;
+        for (uint16_t i = 0; i < count; ++i) {
+            uint32_t slotIdx = base + i;
+            Action a = m_childAction[slotIdx].load(std::memory_order_relaxed);
+            uint32_t visits = m_childN[slotIdx].load(std::memory_order_acquire);
+            float W = m_childW[slotIdx * kNumPlayers + curPlayer].load(std::memory_order_acquire);
+            float prior = m_childPrior[slotIdx].load(std::memory_order_acquire);
+            float Q = (visits > 0) ? (W / visits) : 0.0f;
+
+            std::cout << kSquares[a.from()] << kSquares[a.to()] << kSquares[a.promo()]
+                << " | N=" << visits << " | Q=" << Q
+                << " | W=" << W << " | P=" << prior << std::endl;
+        }
+        std::cout << "======================\n" << std::endl;
+    }
+
+    void rerootByPlayedAction(const Action& played) {
+        // CRITICAL: Search MUST be inactive before rerooting
+        // Otherwise workers might be accessing nodes we're about to free
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+
+        if (m_searchActive.load(std::memory_order_acquire)) {
+            std::cerr << "CRITICAL ERROR: rerootByPlayedAction called during active search!" << std::endl;
+            throw std::runtime_error("Cannot reroot during active search");
+        }
+
+        uint32_t oldRootIdx = m_rootIdx.load(std::memory_order_acquire);
+        if (oldRootIdx == UINT32_MAX) {
+            std::cerr << "WARNING: rerootByPlayedAction called with no root set" << std::endl;
+            return;
+        }
+
+        ObsState oldRootState = m_states[oldRootIdx];
+        std::atomic_thread_fence(std::memory_order_acquire);
+
+        Node& oldRoot = m_nodes[oldRootIdx];
+        uint32_t base = oldRoot.childOffset.load(std::memory_order_acquire);
+        uint16_t count = oldRoot.childCount.load(std::memory_order_acquire);
+
+        // Find played action
         uint16_t playedSlot = UINT16_MAX;
-        for (uint16_t slot = 0; slot < rootNode.childCount; ++slot)
-        {
-            const uint32_t childIdx = base + static_cast<uint32_t>(slot);
-            if (m_childAction[childIdx] == played)
+        for (uint16_t i = 0; i < count; ++i) {
+            Action tempAction = m_childAction[base + i].load(std::memory_order_relaxed);
+            if (tempAction == played)
             {
-                playedSlot = slot;
+                playedSlot = i;
                 break;
             }
         }
 
-        if (playedSlot != UINT16_MAX)
-        {
-            const uint32_t playedSlotIdx = base + static_cast<uint32_t>(playedSlot);
-            const uint32_t candidateNewRoot = m_childNodeIdx[playedSlotIdx];
+        ThreadLocalData tempTld(m_maxDepth, 16, m_historySize);
 
-            // if the child node was already allocated, we can reroot into it
-            if (candidateNewRoot != UINT32_MAX)
-            {
-                m_nodes[candidateNewRoot].parentIdx = UINT32_MAX;
-                m_nodes[candidateNewRoot].setPinned(false);
+        if (playedSlot != UINT16_MAX) {
+            uint32_t newRootIdx = m_childNodeIdx[base + playedSlot].load(std::memory_order_acquire);
 
-                // remove all other children of old root
-                for (int slot = static_cast<int>(rootNode.childCount) - 1; slot >= 0; --slot)
-                {
-                    if (static_cast<uint16_t>(slot) == playedSlot) continue;
-                    const uint32_t slotIdx = base + static_cast<uint32_t>(slot);
-                    const uint32_t childNode = m_childNodeIdx[slotIdx];
-                    if (childNode != UINT32_MAX)
-                    {
-                        freeSubtreeChildren(childNode);
+            if (newRootIdx != UINT32_MAX && newRootIdx < m_maxNodes) {
+                std::cout << "Reusing subtree at node " << newRootIdx << std::endl;
+
+                // Reuse subtree
+                m_nodes[newRootIdx].parentIdx.store(UINT32_MAX, std::memory_order_release);
+
+                // Free siblings (but NOT the played child)
+                for (uint16_t i = 0; i < count; ++i) {
+                    if (i == playedSlot) continue;
+                    uint32_t childIdx = m_childNodeIdx[base + i].load(std::memory_order_acquire);
+                    if (childIdx != UINT32_MAX) {
+                        freeSubtree(childIdx);
                     }
-                    removeChildCompact(oldRoot, static_cast<uint16_t>(slot));
                 }
 
-                // free the old root node itself and set the new root
-                m_freeStack.push_back(oldRoot);
-                m_rootIdx = candidateNewRoot;
+                // Free old root
+                freeNodeGlobal(oldRootIdx);
+
+                // Set new root
+                std::atomic_thread_fence(std::memory_order_seq_cst);
+                m_rootIdx.store(newRootIdx, std::memory_order_release);
+
+                // Update history
+                {
+                    std::lock_guard<std::mutex> lock(m_rootHistMtx);
+                    IdxStateAction sa;
+                    m_engine->obsToIdx(oldRootState, sa.state);
+                    m_engine->actionToIdx(played, sa.lastAction);
+                    m_rootIdxHist.insert(m_rootIdxHist.begin(), sa);
+                    if (m_rootIdxHist.size() > m_historySize) {
+                        m_rootIdxHist.resize(m_historySize);
+                    }
+                }
+
+                std::cout << "Reroot complete. New root: " << newRootIdx
+                    << " with " << m_nodes[newRootIdx].childCount.load() << " children" << std::endl;
                 return;
             }
         }
 
-        // free the whole previous subtree and restart search from the updated rootState.
-        m_engine->applyAction(played, rootState);
-        freeSubtreeChildren(oldRoot);
-        m_freeStack.push_back(oldRoot);
-        startSearch(rootState);
+        // No reusable subtree - start fresh
+        std::cout << "No reusable subtree, starting fresh" << std::endl;
+
+        ObsState newRootState = oldRootState;
+        m_engine->applyAction(played, newRootState);
+
+        // Free entire old tree
+        freeSubtree(oldRootIdx);
+
+        // Update history
+        {
+            std::lock_guard<std::mutex> lock(m_rootHistMtx);
+            IdxStateAction sa;
+            m_engine->obsToIdx(oldRootState, sa.state);
+            m_engine->actionToIdx(played, sa.lastAction);
+            m_rootIdxHist.insert(m_rootIdxHist.begin(), sa);
+            if (m_rootIdxHist.size() > m_historySize) {
+                m_rootIdxHist.resize(m_historySize);
+            }
+        }
+
+        // Start with new state
+        startSearch(newRootState);
+    }
+
+    // ============================================================================
+    // WORKER INTERFACE - Called by thread pool
+    // ============================================================================
+
+    // Run one simulation and add to local batch. Returns false if batch is full.
+    bool runSimulation(ThreadLocalData& tld) {
+        tld.currentPath.clear();
+
+        uint32_t rootIdx = m_rootIdx.load(std::memory_order_acquire);
+        if (rootIdx >= m_maxNodes) {
+            return true;
+        }
+
+        // ====================================================================
+        // SELECTION PHASE
+        // ====================================================================
+        ObsState currentState = m_states[rootIdx];
+        std::atomic_thread_fence(std::memory_order_acquire);
+
+        uint32_t curIdx = rootIdx;
+        int depth = 0;
+        while (depth < m_maxDepth) {
+            if (curIdx >= m_maxNodes) {
+                cleanupPath(tld);
+                return true;
+            }
+
+            Node& curNode = m_nodes[curIdx];
+
+            if (curNode.isTerminal()) {
+                // Terminal node - get values and backprop immediately
+                tld.valuesBuf.clear();
+                tld.valuesBuf.resize(kNumPlayers);
+                m_engine->isTerminal(currentState, tld.valuesBuf);
+
+                SimulationResult sim;
+                sim.leafNodeIdx = curIdx;
+                sim.pathCopy = tld.currentPath;
+                sim.isTerminal = true;
+                sim.terminalValues = tld.valuesBuf;
+
+                backpropagate(sim, sim.terminalValues);
+                m_simulationCount.fetch_add(1u, std::memory_order_relaxed);
+                return true; // Continue simulating
+            }
+
+            if (!curNode.isExpanded()) {
+                // Found unexpanded node
+                break;
+            }
+
+            if (curNode.childCount.load(std::memory_order_acquire) == 0) {
+                // C'est une impasse. On ne peut pas descendre plus bas.
+                // On annule cette simulation et on en lance une nouvelle.
+                cleanupPath(tld); // Annule les virtual loss
+                return true; // 'true' = continuer à simuler (lancer une autre simulation)
+            }
+
+            // Select best child
+            uint32_t nextIdx = selectChild(curIdx, currentState, tld);
+            if (nextIdx >= m_maxNodes) {
+                cleanupPath(tld);
+                return true;
+            }
+
+            curIdx = nextIdx;
+            currentState = m_states[curIdx];
+            std::atomic_thread_fence(std::memory_order_acquire);
+
+            depth++;
+        }
+
+        if (depth >= m_maxDepth) {
+            cleanupPath(tld);
+            return true;
+        }
+
+        // ====================================================================
+        // EXPANSION PHASE
+        // ====================================================================
+        Node& leafNode = m_nodes[curIdx];
+        bool isTerminal = false;
+
+        if (!leafNode.isExpanded()) {
+            if (leafNode.tryLockExpansion()) {
+                try {
+                    isTerminal = expandNode(curIdx, currentState, tld);
+                }
+                catch (...) {
+                    leafNode.unlockExpansion();
+                    cleanupPath(tld);
+                    return true;
+                }
+                leafNode.unlockExpansion();
+            }
+            else {
+                // Wait for expansion
+                int spins = 0;
+                while (leafNode.isExpanding() && spins++ < 100000) {
+                    std::this_thread::yield();
+                }
+
+                if (!leafNode.isExpanded()) {
+                    cleanupPath(tld);
+                    return true;
+                }
+
+                isTerminal = leafNode.isTerminal();
+                if (isTerminal) {
+                    tld.valuesBuf.clear();
+                    tld.valuesBuf.resize(kNumPlayers);
+                    m_engine->isTerminal(currentState, tld.valuesBuf);
+                }
+            }
+        }
+
+        // ====================================================================
+        // PREPARE RESULT
+        // ====================================================================
+        SimulationResult sim;
+        sim.leafNodeIdx = curIdx;
+        sim.pathCopy = tld.currentPath;
+        sim.isTerminal = isTerminal;
+
+        if (isTerminal) {
+            sim.terminalValues = tld.valuesBuf;
+            backpropagate(sim, sim.terminalValues);
+            m_simulationCount.fetch_add(1u, std::memory_order_relaxed);
+            return true;
+        }
+
+        if (leafNode.isExpanded() && leafNode.childCount.load(std::memory_order_acquire) == 0)
+        {
+            // On ne peut ni évaluer (pas un terminal), ni descendre (pas d'enfants).
+            // La seule chose à faire est d'annuler cette simulation.
+            //std::cerr << "WARNING: OOM detected at node " << curIdx << ". Aborting sim." << std::endl;
+            cleanupPath(tld); // Annule les virtual loss
+            return true; // 'true' = continuer à simuler (lancer une autre simulation)
+        }
+
+        // Build history for inference
+        try {
+            buildHistory(tld, tld.historyBuf);
+            sim.historyCopy = tld.historyBuf;
+        }
+        catch (...) {
+            cleanupPath(tld);
+            return true;
+        }
+
+        // Add to batch
+        tld.localBatch.push_back(std::move(sim));
+
+        // Return false if batch is full
+        return tld.localBatch.size() < tld.localBatchCapacity;
+    }
+
+private:
+    void cleanupPath(ThreadLocalData& tld) {
+        // Revert virtual loss for all edges in path
+        for (auto [nodeIdx, slot] : tld.currentPath) {
+            if (nodeIdx >= m_maxNodes) continue;
+
+            Node& node = m_nodes[nodeIdx];
+            uint32_t base = node.childOffset.load(std::memory_order_acquire);
+            uint32_t slotIdx = base + slot;
+
+            ObsState localState = m_states[nodeIdx];
+            uint8_t curPlayer = m_engine->getCurrentPlayer(localState);
+
+            // Revert: N -= 1, W += virtualLoss
+            m_childN[slotIdx].fetch_sub(1u, std::memory_order_acq_rel);
+            m_childW[slotIdx * kNumPlayers + curPlayer].fetch_add(
+                m_virtualLoss, std::memory_order_acq_rel);
+        }
+        tld.currentPath.clear();
     }
 };

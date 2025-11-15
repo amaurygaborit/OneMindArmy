@@ -5,6 +5,12 @@ template<typename GameTag>
 class IRenderer
 {
 protected:
+	using GT = ITraits<GameTag>;
+	using ObsState = typename ObsStateT<GameTag>;
+	using Action = typename ActionT<GameTag>;
+	using IdxState = typename IdxStateT<GameTag>;
+	using IdxAction = typename IdxActionT<GameTag>;
+
 	std::shared_ptr<IEngine<GameTag>> m_engine;
 
 	bool m_isRenderState = false;
@@ -42,8 +48,8 @@ public:
 		specificSetup(config);
 	};
 
-	virtual void renderState(const ObsStateT<GameTag>& obsState) const = 0;
-	virtual void renderValidActions(const ObsStateT<GameTag>& obsState) const = 0;
-	virtual void renderActionPlayed(const ActionT<GameTag>& action, const size_t idPlayer) const = 0;
-	virtual void renderResult(const ObsStateT<GameTag>& obsState) const = 0;
+	virtual void renderState(const ObsState& obsState) const = 0;
+	virtual void renderValidActions(const ObsState& obsState) const = 0;
+	virtual void renderActionPlayed(const Action& action, const size_t player) const = 0;
+	virtual void renderResult(const ObsState& obsState) const = 0;
 };

@@ -13,9 +13,5 @@
 #include "handler/inference/InferenceHandler.hpp"
 #include "handler/training/TrainingHandler.hpp"
 
-#include "player/AIPlayer.hpp"
-#include "player/HumanPlayer.hpp"
-#include "player/IPlayer.hpp"
-
 #include "model/MCTS.hpp"
 #include "model/NeuralNet.cuh"

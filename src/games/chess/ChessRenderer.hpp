@@ -40,7 +40,7 @@ private:
 
 private:
 	void dispBoard(uint64_t board) const;
-	void renderRawState(const ObsStateT<ChessTag>& obsState) const;
+	void renderRawState(const ObsState& obsState) const;
 
 protected:
 	void specificSetup(const YAML::Node& config) override;
@@ -49,8 +49,8 @@ public:
 	ChessRenderer();
 	~ChessRenderer() = default;
 
-	void renderState(const ObsStateT<ChessTag>& obsState) const override;
-	void renderValidActions(const ObsStateT<ChessTag>& obsState) const override;
-	void renderActionPlayed(const ActionT<ChessTag>& action, const size_t idPlayer) const override;
-	void renderResult(const ObsStateT<ChessTag>& obsState) const override;
+	void renderState(const ObsState& obsState) const override;
+	void renderValidActions(const ObsState& obsState) const override;
+	void renderActionPlayed(const Action& action, const size_t player) const override;
+	void renderResult(const ObsState& obsState) const override;
 };

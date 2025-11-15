@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <cstdlib>
 
+#include "util/CompilerHints.hpp"
+
 // Aligned allocator
 template <typename T, size_t Alignment = 64>
 struct AlignedAllocator

@@ -1,6 +1,5 @@
 #pragma once
 #include "../../interfaces/IHandler.hpp"
-#include "../../model/MCTS.hpp"
 #include "PriorityReplayBuffer.hpp"
 
 template<typename GameTag>
@@ -17,8 +16,8 @@ protected:
 		if (!config["common"]["training"]["bufferSize"])
 			throw std::runtime_error("Configuration missing 'common.training.bufferSize' field.");
 
-		if (!config["common"]["training"]["batchSize"])
-			throw std::runtime_error("Configuration missing 'common.training.batchSize' field.");
+		if (!config["common"]["training"]["trainingBatchSize"])
+			throw std::runtime_error("Configuration missing 'common.training.trainingBatchSize' field.");
 
 		uint32_t bufferSize = config["common"]["training"]["bufferSize"].as<uint32_t>();
 		uint32_t batchSize = config["common"]["training"]["batchSize"].as<uint32_t>();

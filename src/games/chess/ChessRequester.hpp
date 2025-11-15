@@ -5,11 +5,12 @@
 class ChessRequester : public IRequester<ChessTag>
 {
 private:
-	void convertToAction(std::string& moveStr, ActionT<ChessTag>& out) const;
+	void convertToAction(std::string& moveStr, Action& out) const;
 
 protected:
 	void specificSetup(const YAML::Node& config) override;
 
 public:
-	void requestAction(const ObsStateT<ChessTag>& obsState, ActionT<ChessTag>& out) const override;
+	void requestInitialState(const size_t player, ObsState& out) const;
+	void requestAction(const ObsState& obsState, Action& out) const override;
 };

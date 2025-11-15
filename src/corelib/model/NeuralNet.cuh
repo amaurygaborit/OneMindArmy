@@ -32,9 +32,47 @@ __global__ void initRand(unsigned long long seed, int width, int height, float* 
 */
 
 template<typename GameTag>
+struct StateActionT
+{
+	ObsStateT<GameTag> state;
+	ActionT<GameTag>   lastAction;
+};
+template<typename GameTag>
+struct IdxStateActionT
+{
+	IdxStateT<GameTag>  state;
+	IdxActionT<GameTag> lastAction;
+};
+template<typename GameTag>
+struct ModelResults
+{
+	AlignedVec<float> values;		// values for every players at the leaf
+	AlignedVec<float> policy;		// policy at the leaf
+	AlignedVec<float> belief;		// buffer for belief probabilities
+
+	ModelResults()
+		: values(ITraits<GameTag>::kNumPlayers)
+		, policy(ITraits<GameTag>::kActionSpace)
+		, belief(ITraits<GameTag>::kNumElems * ITraits<GameTag>::kNumPos)
+	{
+	}
+};
+
+template<typename GameTag>
 class NeuralNet
 {
 private:
+	using GT = ITraits<GameTag>;
+	using ObsState = typename ObsStateT<GameTag>;
+	using Action = typename ActionT<GameTag>;
+	using IdxState = typename IdxStateT<GameTag>;
+	using IdxAction = typename IdxActionT<GameTag>;
+	using StateAction = typename StateActionT<GameTag>;
+	using IdxStateAction = typename IdxStateActionT<GameTag>;
+
+	const uint16_t m_batchSize;
+	const uint16_t m_historySize = 8;
+
 	/*
 	const uint64_t seed;
 	const uint32_t inputSize;								// Taille de l'entrée
@@ -100,130 +138,187 @@ private:
 	*/
 
 public:
-	NeuralNet() = default;
-
-	void forward(const IdxStateT<GameTag>& idxState, float* policy, float* values, float* beliefs)
+	NeuralNet(uint16_t batchSize) : m_batchSize(batchSize)
 	{
-		constexpr int ACTION_SPACE = 4672;
-
-		for (int i = 0; i < ACTION_SPACE; ++i)
-		{
-			policy[i] = static_cast<float>(rand()) / RAND_MAX;
-		}
-		float maxLogit = *std::max_element(policy, policy + ACTION_SPACE);
-		for (int i = 0; i < ACTION_SPACE; ++i)
-		{
-			policy[i] = std::exp(policy[i] - maxLogit);
-		}
-		float sum = std::accumulate(policy, policy + ACTION_SPACE, 0.0f);
-		for (int i = 0; i < ACTION_SPACE; ++i)
-		{
-			policy[i] /= sum;
-		}
-
-		values[0] = static_cast<float>(rand()) / RAND_MAX;
-		values[1] = static_cast<float>(rand()) / RAND_MAX;
 	}
 
-	void normalizeToProba(const AlignedVec<IdxActionT>& validIdxActions, float* policy)
+	void forwardBatch(const AlignedVec<IdxStateAction>& inferenceBuf,
+		AlignedVec<ModelResults<GameTag>>& resultsBuf)
+	{
+		//std::cout << "forwardBatch called with " << resultsBuf.size() << " inferences" << std::endl;
+
+		// Le nombre d'inférences à faire correspond au nombre d'historiques
+		// Chaque historique représente un leaf node à évaluer
+		const size_t numInferences = resultsBuf.size();
+
+		// Vérifier que nous avons assez de données d'entrée
+		// inferenceBuf contient l'historique de chaque inference (historySize par inference)
+
+		// Pour chaque inference dans le batch
+		for (size_t b = 0; b < numInferences; ++b)
+		{
+			ModelResults<GameTag>& results = resultsBuf[b];
+
+			// === POLICY (distribution de probabilité sur les actions) ===
+			// Générer des logits aléatoires
+			for (int i = 0; i < GT::kActionSpace; ++i)
+			{
+				results.policy[i] = static_cast<float>(rand()) / RAND_MAX;
+			}
+
+			// Softmax pour normaliser en probabilités
+			float maxLogit = *std::max_element(results.policy.begin(), results.policy.end());
+			float sum = 0.0f;
+
+			for (int i = 0; i < GT::kActionSpace; ++i)
+			{
+				results.policy[i] = std::exp(results.policy[i] - maxLogit);
+				sum += results.policy[i];
+			}
+
+			for (int i = 0; i < GT::kActionSpace; ++i)
+			{
+				results.policy[i] /= sum;
+			}
+
+			// === VALUES (valeurs pour chaque joueur) ===
+			for (uint8_t p = 0; p < GT::kNumPlayers; ++p)
+			{
+				// Valeurs entre -1 et 1 (typique pour les jeux à somme nulle)
+				results.values[p] = (static_cast<float>(rand()) / RAND_MAX) * 2.0f - 1.0f;
+			}
+
+			// === BELIEF (probabilités pour les éléments cachés) ===
+			// Si tu utilises le belief, sinon on peut ignorer pour l'instant
+			if (results.belief.size() > 0)
+			{
+				float beliefSum = 0.0f;
+				for (size_t i = 0; i < results.belief.size(); ++i)
+				{
+					results.belief[i] = static_cast<float>(rand()) / RAND_MAX;
+					beliefSum += results.belief[i];
+				}
+
+				// Normaliser en probabilités
+				if (beliefSum > 0.0f)
+				{
+					for (size_t i = 0; i < results.belief.size(); ++i)
+					{
+						results.belief[i] /= beliefSum;
+					}
+				}
+			}
+		}
+	}
+
+	// Version alternative plus simple si tu veux juste tester
+	void forwardBatchSimple(const AlignedVec<IdxStateAction>& inferenceBuf,
+		AlignedVec<ModelResults<GameTag>>& resultsBuf)
+	{
+		const size_t numInferences = resultsBuf.size();
+
+		for (size_t b = 0; b < numInferences; ++b)
+		{
+			ModelResults<GameTag>& results = resultsBuf[b];
+
+			// Policy uniforme
+			float uniformProb = 1.0f / static_cast<float>(GT::kActionSpace);
+			for (int i = 0; i < GT::kActionSpace; ++i)
+			{
+				results.policy[i] = uniformProb;
+			}
+
+			// Values aléatoires entre -1 et 1
+			for (uint8_t p = 0; p < GT::kNumPlayers; ++p)
+			{
+				results.values[p] = (static_cast<float>(rand()) / RAND_MAX) * 2.0f - 1.0f;
+			}
+
+			// Belief uniforme si nécessaire
+			if (results.belief.size() > 0)
+			{
+				float uniformBelief = 1.0f / static_cast<float>(results.belief.size());
+				std::fill(results.belief.begin(), results.belief.end(), uniformBelief);
+			}
+		}
+	}
+
+	void normalizeToProba(const AlignedVec<IdxAction>& validIdxActions, float* policy)
 	{
 
 	}
 
 	/*
-	NeuralNet(uint64_t _seed, uint32_t _inputSize, uint32_t _outputSize, uint32_t _hiddenSize, uint32_t _nbHiddenLayers, uint32_t _batchSize,
-		float _momentumNorm, float _gammaNorm, float _betaNorm, float _dropoutRate,
-		float _lambdaL1, float _lambdaL2, float _weightDecay, float _gradientClip)
-		: seed(_seed), inputSize(_inputSize), outputSize(_outputSize), hiddenSize(_hiddenSize), nbHiddenLayers(_nbHiddenLayers),
-		batchSize(_batchSize), layerSizes(_nbHiddenLayers + 2),
-		h_output(_outputSize * _batchSize), h_losses(_batchSize),
-		matOffsets(_nbHiddenLayers + 1), vectOffsets(_nbHiddenLayers + 2),
-		momentumNorm(_momentumNorm), gammaNorm(_gammaNorm), betaNorm(_betaNorm), dropoutRate(_dropoutRate),
-		lambdaL1(_lambdaL1), lambdaL2(_lambdaL2), weightDecay(_weightDecay), gradientClip(_gradientClip), dimBlock(16, 16, 1)
 	{
-		allocateMemoryOnCPU();
-		allocateMemoryOnGPU();
+		// C++ pseudo
+		size_t total_needed = compute_total_bytes(...);
+		void* device_pool = nullptr;
+		cudaMalloc(&device_pool, total_needed);
 
-		initializeWeightsAndBiases();
+		// create offsets
+		char* base = static_cast<char*>(device_pool);
+		char* ptr = base;
+
+		// params
+		W_proj_dev = reinterpret_cast<float16_t*>(ptr); ptr += bytes_W_proj;
+		fact_embeddings_dev = reinterpret_cast<float16_t*>(ptr); ptr += bytes_fact_embeddings;
+		// ... per-layer params
+		// activations/scratch
+		scratch_dev = reinterpret_cast<uint8_t*>(ptr); ptr += bytes_scratch;
+		// outputs
+		belief_logits_dev = reinterpret_cast<float*>(ptr); ptr += bytes_belief;
+		policy_logits_dev = reinterpret_cast<float*>(ptr); ptr += bytes_policy;
+
+
+
+
+		// includes cuda_runtime.h, cublas_v2.h, etc.
+		cudaStream_t stream;
+		cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
+
+		// 1) allocate big device pool
+		size_t total_bytes = compute_total_bytes(...);
+		void* device_pool;
+		cudaMalloc(&device_pool, total_bytes);
+
+		// 2) carve offsets (example)
+		char* base = static_cast<char*>(device_pool);
+		auto align_up = [](size_t n, size_t align) { return (n + align - 1) & ~(align - 1); };
+		size_t offset = 0;
+		size_t align = 256;
+		offset = align_up(offset, align); W_proj_dev = (float16_t*)(base + offset); offset += bytes_W_proj;
+		offset = align_up(offset, align); fact_embeddings_dev = (float16_t*)(base + offset); offset += bytes_fact_embeddings;
+		offset = align_up(offset, align); scratch_dev = (uint8_t*)(base + offset); offset += bytes_scratch;
+		offset = align_up(offset, align); belief_logits_dev = (float*)(base + offset); offset += bytes_belief;
+		// ...
+
+		// 3) allocate host pinned inputs/outputs
+		void* host_in_idx;
+		cudaHostAlloc(&host_in_idx, size_host_in_idx, cudaHostAllocDefault);
+		void* host_out_belief;
+		cudaHostAlloc(&host_out_belief, size_host_out_belief, cudaHostAllocDefault);
+
+		// fill host_in_idx with batch data...
+
+		// 4) copy indices to GPU async
+		cudaMemcpyAsync(device_pool + offset_idx, host_in_idx, size_host_in_idx, cudaMemcpyHostToDevice, stream);
+
+		// 5) launch gather kernel (device: read embeddings table & indices -> write emb_fact_vectors)
+		gatherEmbeddingsKernel << <grid, block, 0, stream >> > (  pointers: embeddings_dev, indices_dev, out_emb_dev, B*S, ... );
+
+		// 6) run GEMMs / transformer on stream (cublas handles with stream)
+		cublasSetStream(handle, stream);
+		cublasGemmStridedBatched(...);
+
+		// 7) after final heads, copy outputs back async
+		cudaMemcpyAsync(host_out_belief, belief_logits_dev, size_host_out_belief, cudaMemcpyDeviceToHost, stream);
+
+		// 8) synchronize (or use event)
+		cudaStreamSynchronize(stream);
+
+		// host_out_belief is ready to use on CPU
+
 	}
-	~NeuralNet()
-	{
-		// Libérer la mémoire GPU
-		cudaFree(d_weights);
-		cudaFree(d_biases);
-
-		cudaFree(d_mWeights);
-		cudaFree(d_vWeights);
-		cudaFree(d_mBiases);
-		cudaFree(d_vBiases);
-
-		cudaFree(d_activations);
-		cudaFree(d_errors);
-		cudaFree(d_maskDropout);
-		cudaFree(d_regPenalties);
-		cudaFree(d_losses);
-
-		cudaDeviceSynchronize();
-	}
-
-	void allocateMemoryOnCPU()
-	{
-		// Initialisation de la liste de la taille des différentes couches
-		layerSizes.pushBack(inputSize);
-		for (int i = 0; i < nbHiddenLayers; i++) layerSizes.pushBack(hiddenSize);
-		layerSizes.pushBack(outputSize);
-
-		uint32_t matOffset = 0, vectOffset = 0;
-		for (int i = 0; i < nbHiddenLayers + 1; i++)
-		{
-			matOffsets.pushBack(matOffset);
-			vectOffsets.pushBack(vectOffset);
-
-			matOffset += layerSizes[i] * layerSizes[i + 1];
-			vectOffset += layerSizes[i + 1] * batchSize;
-		}
-		// Dernières couches
-		vectOffsets.pushBack(vectOffset);
-	}
-
-	// Allocation pour la mémoire GPU
-	void allocateMemoryOnGPU()
-	{
-		// 1. Calcul des tailles totales pour chaque tableau
-		int totalWeights = 0, totalBiases = 0, totalActivations = 0;
-		for (int i = 0; i < nbHiddenLayers + 1; i++) {
-			totalWeights += layerSizes[i] * layerSizes[i + 1];
-			totalBiases += layerSizes[i + 1];
-			totalActivations += layerSizes[i] * batchSize;
-		}
-		// Dernière couche
-		totalActivations += layerSizes[nbHiddenLayers + 1] * batchSize;
-
-		// 2. Allocation des tableaux 1D sur le GPU
-		cudaMalloc(&d_weights, totalWeights * sizeof(float));
-		cudaMalloc(&d_biases, totalBiases * sizeof(float));
-		cudaMalloc(&d_mWeights, totalWeights * sizeof(float));
-		cudaMalloc(&d_vWeights, totalWeights * sizeof(float));
-		cudaMalloc(&d_mBiases, totalBiases * sizeof(float));
-		cudaMalloc(&d_vBiases, totalBiases * sizeof(float));
-
-		cudaMalloc(&d_activations, totalActivations * sizeof(float));
-		cudaMalloc(&d_errors, totalActivations * sizeof(float));
-		cudaMalloc(&d_maskDropout, totalActivations * sizeof(float));	// Dropout utilisé seulement pour les couches cachées
-		cudaMalloc(&d_regPenalties, totalWeights * sizeof(float));
-		cudaMalloc(&d_losses, batchSize * sizeof(float));
-		cudaMalloc(&d_targets, outputSize * batchSize * sizeof(float));
-	}
-	void initializeWeightsAndBiases() const;
-
-	float* forwardNetwork(const float* input);
-	float* forwardBatchNetwork(const float* inputsBatch);
-	float backwardBatchNetwork(const float* target);
-
-	void updateWeightsNetwork(float learningRate);
-
-	void saveWeightsAndBiases(const std::string& filename) const;
-	void loadWeightsAndBiases(const std::string& filename) const;
 	*/
 };
 

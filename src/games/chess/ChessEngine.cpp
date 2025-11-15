@@ -7,29 +7,26 @@
 #include <bit>
 
 ChessEngine::ChessEngine()
-	: m_validActionsBuf(0)
 {
 }
 
 void ChessEngine::specificSetup(const YAML::Node& config)
 {
 	std::cout << "ChessEngine setup called\n";
-
-	m_validActionsBuf.reserve(m_maxValidActions);
 }
 
-void ChessEngine::getInitialState(ObsStateT<ChessTag>& out)
+void ChessEngine::getInitialState(const size_t player, ObsState& out) const
 {
 	FenParser::getFenState("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", out);
 	//FenParser::getFenState("rnbqkbnr/1pp2ppp/p2p4/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR w KQkq - 0 4", out);
 }
 
-uint8_t ChessEngine::getCurrentPlayer(const ObsStateT<ChessTag>& obsState)
+size_t ChessEngine::getCurrentPlayer(const ObsState& obsState) const
 {
 	return obsState.meta.trait;
 }
 
-void ChessEngine::getValidActions(const ObsStateT<ChessTag>& obsState, AlignedVec<ActionT<ChessTag>>& out)
+void ChessEngine::getValidActions(const ObsState& obsState, AlignedVec<Action>& out) const
 {
 	uint8_t meta0 = obsState.meta.trait;
 	uint8_t meta1 = obsState.meta.castlingRights;
@@ -114,19 +111,19 @@ void ChessEngine::getValidActions(const ObsStateT<ChessTag>& obsState, AlignedVe
 	}
 }
 
-bool ChessEngine::isValidAction(const ObsStateT<ChessTag>& obsState, const ActionT<ChessTag>& action)
+bool ChessEngine::isValidAction(const ObsState& obsState, const Action& action) const
 {
-	m_validActionsBuf.clear();
-	getValidActions(obsState, m_validActionsBuf);
+	AlignedVec<Action> validActionsBuf(reserve_only, GT::kMaxValidActions);
+	getValidActions(obsState, validActionsBuf);
 
-	for (int i = 0; i < m_validActionsBuf.size(); ++i)
+	for (size_t a = 0; a < validActionsBuf.size(); ++a)
 	{
-		if (m_validActionsBuf[i] == action) return true;
+		if (validActionsBuf[a] == action) return true;
 	}
 	return false;
 }
 
-void ChessEngine::applyAction(const ActionT<ChessTag>& action, ObsStateT<ChessTag>& out)
+void ChessEngine::applyAction(const Action& action, ObsState& out) const
 {
 	uint8_t meta0 = out.meta.trait;
 	uint8_t meta1 = out.meta.castlingRights;
@@ -211,11 +208,11 @@ void ChessEngine::applyAction(const ActionT<ChessTag>& action, ObsStateT<ChessTa
 	}
 }
 
-bool ChessEngine::isFiftyMoveRule(const ObsStateT<ChessTag>& obsState)
+bool ChessEngine::isFiftyMoveRule(const ObsState& obsState) const
 {
 	return (obsState.meta.halfmoveClock >= 100);
 }
-bool ChessEngine::isInsufficientMaterial(const ObsStateT<ChessTag>& obsState)
+bool ChessEngine::isInsufficientMaterial(const ObsState& obsState) const
 {
 	// Pawns, rooks, queens -> sufficient
 	if (obsState.elems.whiteBB[0] != 0 || obsState.elems.whiteBB[3] != 0 || obsState.elems.whiteBB[4] != 0 ||
@@ -246,7 +243,7 @@ bool ChessEngine::isInsufficientMaterial(const ObsStateT<ChessTag>& obsState)
 	return false;
 }
 
-bool ChessEngine::ourKingInCheck(const ObsStateT<ChessTag>& obsState)
+bool ChessEngine::ourKingInCheck(const ObsState& obsState) const
 {
 	int checkCount = 0;
 
@@ -334,7 +331,7 @@ bool ChessEngine::ourKingInCheck(const ObsStateT<ChessTag>& obsState)
 	return (checkCount > 0);
 }
 
-bool ChessEngine::isTerminal(const ObsStateT<ChessTag>& obsState, AlignedVec<float>& out)
+bool ChessEngine::isTerminal(const ObsState& obsState, AlignedVec<float>& out) const
 {
 	// draw
 	if (isFiftyMoveRule(obsState) || isInsufficientMaterial(obsState))
@@ -342,11 +339,11 @@ bool ChessEngine::isTerminal(const ObsStateT<ChessTag>& obsState, AlignedVec<flo
 		return true;
 	}
 
-	m_validActionsBuf.clear();
-	getValidActions(obsState, m_validActionsBuf);
+	AlignedVec<Action> validActionsBuf(reserve_only, GT::kMaxValidActions);
+	getValidActions(obsState, validActionsBuf);
 
 	// No valid move
-	if (m_validActionsBuf.empty())
+	if (validActionsBuf.empty())
 	{
 		// Stalemate
 		if (!ourKingInCheck(obsState))
@@ -371,16 +368,16 @@ bool ChessEngine::isTerminal(const ObsStateT<ChessTag>& obsState, AlignedVec<flo
 	return false;
 }
 
-void ChessEngine::obsToIdx(const ObsStateT<ChessTag>& obsState, IdxStateT<ChessTag>& out)
+void ChessEngine::obsToIdx(const ObsState& obsState, IdxState& out) const
 {
 
 }
-void ChessEngine::idxToObs(const IdxStateT<ChessTag>& idxInput, ObsStateT<ChessTag>& out)
+void ChessEngine::idxToObs(const IdxState& idxInput, ObsState& out) const
 {
 
 }
 
-void ChessEngine::actionToIdx(const ActionT<ChessTag>& action, IdxActionT& out)
+void ChessEngine::actionToIdx(const Action& action, IdxAction& out) const
 {
 	const uint8_t fromIdx = action.from();
 	const uint8_t toIdx = action.to();
@@ -412,7 +409,7 @@ void ChessEngine::actionToIdx(const ActionT<ChessTag>& action, IdxActionT& out)
 			else if (rankDiff < 0 && fileDiff < 0)	encodedTo = 35 + (-rankDiff - 1);
 			else if (rankDiff == 0 && fileDiff < 0)	encodedTo = 42 + (-fileDiff - 1);
 			else if (rankDiff > 0 && fileDiff < 0)	encodedTo = 49 + (-fileDiff - 1);
-			else throw std::runtime_error("ChessEngine::getValidEncodedActions: Invalid sliding piece move");
+			else throw std::runtime_error("ChessEngine::actionToIdx(): Invalid sliding piece move");
 		}
 		// Knight Moves
 		else if ((std::abs(rankDiff) == 2 && std::abs(fileDiff) == 1)
@@ -426,10 +423,10 @@ void ChessEngine::actionToIdx(const ActionT<ChessTag>& action, IdxActionT& out)
 			else if (rankDiff == -1 && fileDiff == -2) encodedTo = 61;
 			else if (rankDiff == 1 && fileDiff == -2)  encodedTo = 62;
 			else if (rankDiff == 2 && fileDiff == -1)  encodedTo = 63;
-			else throw std::runtime_error("ChessEngine::getValidEncodedActions: Invalid knight move");
+			else throw std::runtime_error("ChessEngine::actionToIdx(): Invalid knight move");
 		}
 		else
-			throw std::runtime_error("ChessEngine::getValidEncodedActions: Invalid piece move");
+			throw std::runtime_error("ChessEngine::actionToIdx(): Invalid piece move");
 	}
 	else
 	{
@@ -441,12 +438,12 @@ void ChessEngine::actionToIdx(const ActionT<ChessTag>& action, IdxActionT& out)
 		if (std::abs(rankDiff) == 1 && fileDiff == 0)  encodedTo = 64 + promoType;
 		else if (std::abs(rankDiff) == 1 && fileDiff == -1) encodedTo = 67 + promoType;
 		else if (std::abs(rankDiff) == 1 && fileDiff == 1)  encodedTo = 70 + promoType;
-		else throw std::runtime_error("ChessEngine::getValidEncodedActions: Invalid promotion move");
+		else throw std::runtime_error("ChessEngine::actionToIdx(): Invalid promotion move");
 	}
 
-	Fact::makePublicAction(encodedFrom + encodedTo, toIdx, out);
+	out = Fact<ChessTag>::makePublicAction(encodedFrom + encodedTo, toIdx);
 }
-void ChessEngine::idxToAction(const IdxActionT& idxAction, ActionT<ChessTag>& out)
+void ChessEngine::idxToAction(const IdxAction& idxAction, Action& out) const
 {
 
 }

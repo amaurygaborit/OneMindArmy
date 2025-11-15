@@ -15,6 +15,10 @@ struct PerftTest
 class PerftTool
 {
 private:
+    using GT = ITraits<ChessTag>;
+    using ObsState = typename ObsStateT<ChessTag>;
+    using Action = typename ActionT<ChessTag>;
+
     std::shared_ptr<IEngine<ChessTag>> m_engine;
 
     static constexpr const char* kSquaresName[64] =
@@ -34,7 +38,7 @@ public:
     PerftTool();
     PerftTool(std::shared_ptr<IEngine<ChessTag>> engine);
 
-    uint64_t perft(const ObsStateT<ChessTag>& root, int maxDepth);
+    uint64_t perft(const ObsState& root, int maxDepth);
 
     void runNormal(const AlignedVec<PerftTest>& normalTests);
     void runDivide(const AlignedVec<PerftTest>& divideTests);

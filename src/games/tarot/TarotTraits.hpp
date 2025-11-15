@@ -5,7 +5,7 @@
 struct TarotTag {};
 
 template<>
-struct GameTraits<TarotTag>
+struct ITraits<TarotTag>
 {
     static constexpr uint16_t N_ELEMS = 78;
     static constexpr uint16_t N_META = 6;
