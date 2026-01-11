@@ -1,43 +1,74 @@
 name: chess
 
-common:
-  # Renderer
-  renderer:
-    renderState:        true
-    renderValidActions: false
-    renderActionPlayed: true
-    renderResult:       true
-    
-  # Model
-  model:
+# ==========================================
+# 1. BACKEND (Hardware & Performance)
+# ==========================================
+backend:
+  device:
+    numGPUs: auto
+    maxBatchSize: 256
+  
+  threading:
+    numSearchThreads: 8
+    numBackpropThreads: 2
+    numInferenceThreads: 1
+  
+  optimization:
+    queueScale: 2.0
+    fastDrain: true
+
+# ==========================================
+# 2. ENGINE (Algorithm & Architecture)
+# ==========================================
+engine:
+  memory:
+    maxNodes: 20000000
+    memoryThreshold: 0.90
+    reuseTree: true
+
+  search:
+    maxDepth: 128
+    cPUCT: 1.5
+    virtualLoss: 1.0
+
+  network:
+    historySize: 8
+
+# ==========================================
+# 3. SESSION (Runtime, Match & Display)
+# ==========================================
+session:
+  players:
+    numHumans: 0
     autoInitialState: true
 
-    maxNodes:   1000000
-    maxSamples: 1
+  timeControl:
+    numSimulations: 10000
 
-    numThreads: 4
-    mctsBatchSize: 64
-    historySize: 8
-    maxDepth: 100
+  strategy:
+    temperature: 1.0
 
-    cPUCT:    1.5
-    virtualLoss: 1
-    keepK:    5
+  render:
+    renderState: true
+    renderValidActions: false
+    renderActionPlayed: true
+    renderResult: true
 
-  # Inference
-  inference:
-    numHumans: 0
+# ==========================================
+# 4. TRAINING (Learning Hyperparameters)
+# ==========================================
+training:
+  bufferSize: 10000
+  batchSize: 64
+  learningRate: 0.001
+  epochs: 100
 
-  # Training
-  training:
-    bufferSize:        10000
-    trainingBatchSize: 64
-    learningRate:      0.001
-    epochs:            100
-
-gameSpecific:
-  # ChessRenderer specific
-  whiteAtBottom:   true
-  showCoordinates: true
-  renderRawState:  false
-  
+# ==========================================
+# 5. SPECIFIC (Game & Implementation details)
+# ==========================================
+specific:
+  render:
+    whiteAtBottom: true
+    showCoordinates: true
+    replaceRendering: true
+    renderRawState: false

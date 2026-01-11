@@ -57,21 +57,30 @@ concept ValidGameTraits = requires
 template<typename GameTag>
 struct UIntTypes
 {
-    static constexpr size_t kNumPlayers = ITraits<GameTag>::kNumPlayers + 1;
+    // Garder le compte réel pour les masques
+    static constexpr size_t kRealNumPlayers = ITraits<GameTag>::kNumPlayers;
+
+    // Le +1 est uniquement pour l'Owner ID (0 = None/Public, 1..N = Players)
+    static constexpr size_t kNumOwnerIds = ITraits<GameTag>::kNumPlayers + 1;
+
     static constexpr size_t kNumElems = ITraits<GameTag>::kNumElems;
     static constexpr size_t kNumMeta = ITraits<GameTag>::kNumMeta;
     static constexpr size_t kActionSpace = ITraits<GameTag>::kActionSpace;
+
+    // Correction de kTotalFacts pour utiliser kActionSpace
     static constexpr size_t kTotalFacts = kNumElems + kNumMeta + kActionSpace + 1;
+
     static constexpr size_t kNumPos = ITraits<GameTag>::kNumPos + 1;
     static constexpr size_t kMaxValidActions = ITraits<GameTag>::kMaxValidActions;
 
     using FIdx = SelectMinimalUIntT<kTotalFacts>;
     using PIdx = SelectMinimalUIntT<kNumPos>;
-    using OIdx = SelectMinimalUIntT<kNumPlayers>;
+    using OIdx = SelectMinimalUIntT<kNumOwnerIds>; // Utilise kNumOwnerIds
 
-    using VMask = std::conditional_t<(kNumPlayers <= 8), uint8_t,
-        std::conditional_t<(kNumPlayers <= 16), uint16_t,
-        std::conditional_t<(kNumPlayers <= 32), uint32_t,
+    // VMask basé sur le nombre REEL de joueurs
+    using VMask = std::conditional_t<(kRealNumPlayers <= 8), uint8_t,
+        std::conditional_t<(kRealNumPlayers <= 16), uint16_t,
+        std::conditional_t<(kRealNumPlayers <= 32), uint32_t,
         uint64_t>>>;
 };
 
@@ -92,7 +101,8 @@ struct Fact
     using PIdx = typename Types::PIdx;
     using OIdx = typename Types::OIdx;
 
-    static constexpr size_t kNumPlayers = Types::kNumPlayers;
+    // Utiliser le vrai nombre de joueurs pour la logique
+    static constexpr size_t kNumPlayers = Types::kRealNumPlayers;
 
     FIdx     factIdx;
     VMask    visibleMask;
@@ -100,8 +110,7 @@ struct Fact
     OIdx     ownerIdx;
     FactType typeIdx;
 
-    static constexpr VMask kVisibleToAll =
-        static_cast<VMask>((static_cast<VMask>(1) << kNumPlayers) - static_cast<VMask>(1));
+    static constexpr VMask kVisibleToAll = static_cast<VMask>(~static_cast<VMask>(0));
     static constexpr VMask kVisibleToNone = static_cast<VMask>(0);
 
     constexpr bool isElement() const noexcept { return typeIdx == FactType::ELEMENT; }
@@ -218,3 +227,14 @@ struct IdxStateT
 
 template<typename GameTag>
 using IdxActionT = Fact<GameTag>;
+
+template<typename GameTag>
+struct IdxStateActionT
+{
+    IdxStateT<GameTag>  idxState;
+    IdxActionT<GameTag> idxAction;
+
+    IdxStateActionT() noexcept
+        : idxState(), idxAction(Fact<GameTag>::MakePad(FactType::ACTION))
+    {}
+};

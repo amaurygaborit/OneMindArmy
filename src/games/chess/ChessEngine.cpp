@@ -28,6 +28,8 @@ size_t ChessEngine::getCurrentPlayer(const ObsState& obsState) const
 
 void ChessEngine::getValidActions(const ObsState& obsState, AlignedVec<Action>& out) const
 {
+	out.clear();
+
 	uint8_t meta0 = obsState.meta.trait;
 	uint8_t meta1 = obsState.meta.castlingRights;
 	uint8_t meta2 = obsState.meta.enPassant;
@@ -370,7 +372,44 @@ bool ChessEngine::isTerminal(const ObsState& obsState, AlignedVec<float>& out) c
 
 void ChessEngine::obsToIdx(const ObsState& obsState, IdxState& out) const
 {
+	size_t factIdx = 0;
+	size_t maxFacts = out.elemFacts.size();
 
+	// --- 1. Pièces Blanches (IDs 0 à 5) ---
+	for (int i = 0; i < 6; ++i)
+	{
+		uint64_t bb = obsState.elems.whiteBB[i];
+		while (bb)
+		{
+			int sq = std::countr_zero(bb);
+			bb &= (bb - 1);
+
+			if (factIdx < maxFacts) {
+				out.elemFacts[factIdx++] = Fact<ChessTag>::makePublicElem(i, sq);
+			}
+		}
+	}
+
+	// --- 2. Pièces Noires (IDs 6 à 11) ---
+	for (int i = 0; i < 6; ++i)
+	{
+		uint64_t bb = obsState.elems.blackBB[i];
+		while (bb)
+		{
+			int sq = std::countr_zero(bb);
+			bb &= (bb - 1);
+
+			if (factIdx < maxFacts) {
+				out.elemFacts[factIdx++] = Fact<ChessTag>::makePublicElem(i + 6, sq);
+			}
+		}
+	}
+
+	// SAFETY: Remplir le reste avec du Padding explicitement
+	// C'est vital car 'out' peut être réutilisé et contenir de vieilles données
+	while (factIdx < maxFacts) {
+		out.elemFacts[factIdx++] = Fact<ChessTag>::MakePad(FactType::ELEMENT);
+	}
 }
 void ChessEngine::idxToObs(const IdxState& idxInput, ObsState& out) const
 {

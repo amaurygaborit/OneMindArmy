@@ -3,6 +3,7 @@
 
 #include "ITraits.hpp"
 #include "AlignedVec.hpp"
+#include "../bootstrap/GameConfig.hpp"
 
 template<typename GameTag>
 class IEngine

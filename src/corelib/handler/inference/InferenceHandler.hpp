@@ -11,119 +11,72 @@ protected:
     using ObsState = typename IHandler<GameTag>::ObsState;
     using Action = typename IHandler<GameTag>::Action;
 
-    void specificSetup(const YAML::Node& config) override {
-        std::cout << "Inference handler initialized" << std::endl;
+    void specificSetup(const YAML::Node& config) override
+    {
     }
 
 public:
-    void execute() override {
+    void execute() override
+    {
         ObsState currentState;
-        AlignedVec<float> values(GT::kNumPlayers);
-        bool isTerminal = false;
+        Action selectedAction;
 
-        // Initialize all MCTS instances with starting state
-        std::cout << "Initializing game..." << std::endl;
-        for (size_t p = 0; p < this->m_numAI; ++p) {
-            if (this->m_autoInitialState) {
-                this->m_engine->getInitialState(p, currentState);
-            }
-            else {
-                this->m_requester->requestInitialState(p, currentState);
-            }
-
-            try {
-                this->m_mcts[p]->startSearch(currentState);
-            }
-            catch (const std::exception& e) {
-                std::cerr << "ERROR initializing MCTS " << p << ": " << e.what() << std::endl;
-                throw;
-            }
+        // Init Game
+        if (this->m_baseConfig.autoInitialState)
+        {
+            this->m_engine->getInitialState(0, currentState);
+        }
+        else {
+            this->m_requester->requestInitialState(0, currentState);
         }
 
-        // Game loop
-        int moveCount = 0;
+        // Init MCTS trees
+        for (size_t p = 0; p < this->m_baseConfig.numAIs; ++p)
+        {
+            this->m_mcts[p]->startSearch(currentState);
+        }
+
+        bool isTerminal = false;
+        AlignedVec<float> values(GT::kNumPlayers);
+
+        std::cout << "\033[s";
         while (!isTerminal) {
-            moveCount++;
-            std::cout << "\n=== Move " << moveCount << " ===" << std::endl;
+            size_t player = this->m_engine->getCurrentPlayer(currentState);
 
             this->m_renderer->renderState(currentState);
             this->m_renderer->renderValidActions(currentState);
 
-            size_t currentPlayer = this->m_engine->getCurrentPlayer(currentState);
-            Action selectedAction;
+            auto t0 = std::chrono::high_resolution_clock::now();
 
-            if (currentPlayer < this->m_numAI) {
-                std::cout << "AI Player " << currentPlayer << " thinking..." << std::endl;
-
-                try {
-                    // CRITICAL FIX: Ensure workers are idle BEFORE starting search
-                    if (!this->m_threadPool->waitForIdle(10000)) {
-                        std::cerr << "ERROR: Workers not idle before search!" << std::endl;
-                        throw std::runtime_error("Thread pool synchronization failed before search");
-                    }
-
-                    // Execute MCTS
-                    this->m_mcts[currentPlayer]->run(10000, *this->m_threadPool);
-
-                    // CRITICAL FIX: Wait for workers to be idle AFTER search
-                    if (!this->m_threadPool->waitForIdle(10000)) {
-                        std::cerr << "ERROR: Workers did not become idle after search!" << std::endl;
-                        throw std::runtime_error("Thread pool synchronization failed after search");
-                    }
-
-                    // CRITICAL FIX: Clear worker caches AFTER ensuring they're idle
-                    this->m_threadPool->clearWorkerCaches();
-
-                    // Get best action (now safe)
-                    this->m_mcts[currentPlayer]->bestActionFromRoot(selectedAction);
-                }
-                catch (const std::exception& e) {
-                    std::cerr << "ERROR during MCTS search for player "
-                        << currentPlayer << ": " << e.what() << std::endl;
-                    throw;
-                }
+            if (player < this->m_baseConfig.numAIs)
+            {
+                // AI Turn
+                this->m_threadPool->executeMCTS(this->m_mcts[player].get(), this->m_baseConfig.numSimulations);
+                this->m_mcts[player]->selectMove(this->m_baseConfig.temperature, selectedAction);
             }
-            else {
-                std::cout << "Human Player " << currentPlayer << " turn" << std::endl;
+            else
+            {
+                // Human Turn
                 this->m_requester->requestAction(currentState, selectedAction);
             }
-
-            // CRITICAL FIX: Ensure workers are COMPLETELY idle before rerooting
-            std::cout << "Waiting for complete synchronization before reroot..." << std::endl;
-            if (!this->m_threadPool->waitForIdle(10000)) {
-                std::cerr << "ERROR: Workers not idle before reroot!" << std::endl;
-                throw std::runtime_error("Thread pool not idle before reroot");
-            }
-
-            // Apply action to game state BEFORE rerooting
+            // Apply Move
             this->m_engine->applyAction(selectedAction, currentState);
-            this->m_renderer->renderActionPlayed(selectedAction, currentPlayer);
 
-            // Update all MCTS trees with played action
-            std::cout << "Updating MCTS trees..." << std::endl;
-            for (size_t p = 0; p < this->m_numAI; ++p) {
-                try {
-                    this->m_mcts[p]->rerootByPlayedAction(selectedAction);
-                }
-                catch (const std::exception& e) {
-                    std::cerr << "WARNING: Error rerooting MCTS " << p << ": " << e.what() << std::endl;
+            auto t1 = std::chrono::high_resolution_clock::now();
 
-                    // If error is for current player, it's critical
-                    if (p == currentPlayer) {
-                        throw;
-                    }
-                    // Otherwise, tree will restart from scratch
-                }
+            this->m_renderer->renderActionPlayed(selectedAction, player);
+
+            double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+            std::cout << "Time: " << ms << " ms" << std::endl;
+
+            for (size_t p = 0; p < this->m_baseConfig.numAIs; ++p)
+            {
+                this->m_mcts[p]->startSearch(currentState);
             }
 
-            // Check terminal condition
-            values.clear();
-            values.resize(GT::kNumPlayers);
             isTerminal = this->m_engine->isTerminal(currentState, values);
         }
-
-        // Game over
-        std::cout << "\n=== Game Over ===" << std::endl;
+        // End the Game
         this->m_renderer->renderState(currentState);
         this->m_renderer->renderResult(currentState);
     }

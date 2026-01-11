@@ -1,543 +1,383 @@
 #pragma once
 #include "MCTS.hpp"
-#include <thread>
+#include "../bootstrap/GameConfig.hpp"
+#include <deque>
 #include <mutex>
 #include <condition_variable>
-#include <chrono>
+#include <thread>
 #include <atomic>
+#include <chrono>
 
 template<typename GameTag>
 class MCTSThreadPool
 {
+public:
+    using Event = NodeEvent<GameTag>;
+    using IdxAction = typename MCTS<GameTag>::IdxAction;
+    using IdxStateAction = typename MCTS<GameTag>::IdxStateAction;
+    using ModelResults = typename MCTS<GameTag>::ModelResults;
+
 private:
-    using GT = ITraits<GameTag>;
-    using ObsState = typename ObsStateT<GameTag>;
-    using Action = typename ActionT<GameTag>;
-    using IdxStateAction = typename IdxStateActionT<GameTag>;
-    using ModelResults = typename ModelResults<GameTag>;
-    using ThreadLocalData = typename MCTS<GameTag>::ThreadLocalData;
-    using SimulationResult = typename MCTS<GameTag>::SimulationResult;
+    template<typename T>
+    class ThreadSafeQueue
+    {
+        std::deque<T> queue;
+        mutable std::mutex m_mutex;
+        std::condition_variable m_cv;
+        bool m_done = false;
 
-    // ============================================================================
-    // WORKER CONTEXT
-    // ============================================================================
-    struct WorkerContext {
-        std::unique_ptr<ThreadLocalData> tld;
-        std::thread thread;
-        uint32_t threadId;
+    public:
+        void push(T item)
+        {
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                queue.push_back(item);
+            }
+            m_cv.notify_one();
+        }
 
-        // Results from inference
-        std::vector<AlignedVec<float>> inferenceResults;
+        bool pop(T& item)
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            m_cv.wait(lock, [this] { return !queue.empty() || m_done; });
+            if (queue.empty()) return false;
+            item = queue.front();
+            queue.pop_front();
+            return true;
+        }
 
-        WorkerContext(uint32_t id, uint16_t maxDepth, uint32_t batchCapacity, uint8_t historySize)
-            : threadId(id) {
-            tld = std::make_unique<ThreadLocalData>(maxDepth, batchCapacity, historySize);
+        size_t pop_batch_opportunistic(AlignedVec<T>& outBatch, size_t maxItems, std::chrono::microseconds timeout)
+        {
+            std::unique_lock<std::mutex> lock(m_mutex);
+            if (!m_cv.wait_for(lock, timeout, [this] { return !queue.empty() || m_done; }))
+            {
+                if (queue.empty()) return 0;
+            }
+            size_t count = 0;
+            while (!queue.empty() && count < maxItems)
+            {
+                outBatch.push_back(queue.front());
+                queue.pop_front();
+                count++;
+            }
+            return count;
+        }
+
+        void signal_done()
+        {
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                m_done = true;
+            }
+            m_cv.notify_all();
+        }
+
+        void reset()
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            m_done = false;
+            queue.clear();
+        }
+
+        bool empty() const
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            return queue.empty();
         }
     };
 
-    // ============================================================================
-    // MEMBER VARIABLES
-    // ============================================================================
+    std::mutex m_waitMutex;
+    std::condition_variable m_waitCV;
+    std::atomic<int> m_busyEvents{ 0 };
+    std::atomic<uint32_t> m_targetSimulations{ 0 };
 
-    std::shared_ptr<NeuralNet<GameTag>> m_neuralNet;
+    std::shared_ptr<IEngine<GameTag>> m_engine;
+    AlignedVec<std::unique_ptr<NeuralNet<GameTag>>> m_neuralNets;
+    AlignedVec<std::unique_ptr<std::mutex>> m_netMutexes;
 
-    const uint32_t m_batchSize;
-    const uint8_t m_historySize;
-    const uint16_t m_maxDepth;
-    const uint8_t m_numThreads;
+    // Configuration Système (Backend)
+    const SystemConfig m_sysConfig;
 
-    // Worker threads
-    std::vector<std::unique_ptr<WorkerContext>> m_workers;
+    AlignedVec<Event> m_eventStorage;
+    ThreadSafeQueue<Event*> m_freeEvents;
 
-    // Current MCTS instance
+    AlignedVec<std::thread> m_gatherThreads;
+    AlignedVec<std::thread> m_inferenceThreads;
+    AlignedVec<std::thread> m_backpropThreads;
+
+    ThreadSafeQueue<Event*> m_evalQueue;
+    ThreadSafeQueue<Event*> m_backpropQueue;
+
+    std::atomic<bool> m_stopFlag{ false };
+    std::atomic<bool> m_draining{ false };
+
     MCTS<GameTag>* m_currentMCTS{ nullptr };
 
-    // Stop flag
-    std::atomic<bool> m_stopFlag{ false };
+public:
+    MCTSThreadPool(std::shared_ptr<IEngine<GameTag>> engine,
+        AlignedVec<std::unique_ptr<NeuralNet<GameTag>>>&& neuralNets,
+        const SystemConfig& sysConfig,
+        const MCTSConfig& mctsConfig) // MCTSConfig pour l'init des Events
+        : m_engine(std::move(engine)),
+        m_neuralNets(std::move(neuralNets)),
+        m_sysConfig(sysConfig)
+    {
+        if (m_neuralNets.empty())
+            throw std::runtime_error("MCTSThreadPool: 0 NeuralNets provided");
 
-    // Synchronization for batch collection
-    std::mutex m_syncMutex;
-    std::condition_variable m_syncCV;
-    std::atomic<uint32_t> m_workersWaiting{ 0 };
-    std::atomic<bool> m_batchReady{ false };
-    std::atomic<bool> m_resultsReady{ false };
-    std::atomic<uint32_t> m_workersActive{ 0 };
+        m_netMutexes.reserve(m_neuralNets.size());
+        for (size_t i = 0; i < m_neuralNets.size(); ++i)
+            m_netMutexes.push_back(std::make_unique<std::mutex>());
 
-    // Synchronization for adaptive barrier
-    std::atomic<uint32_t> m_batchId{ 0 };           // Current batch generation
-    std::atomic<uint32_t> m_workersWithWork{ 0 };    // How many workers have work this batch
-    std::atomic<bool> m_coordinationInProgress{ false };
+        size_t totalInferenceThreads = m_neuralNets.size() * m_sysConfig.numInferenceThreadsPerGPU;
+        size_t totalThreads = m_sysConfig.numSearchThreads + totalInferenceThreads + m_sysConfig.numBackpropThreads;
+
+        // Note: BatchSize est maintenant dans sysConfig
+        size_t poolSize = static_cast<size_t>(
+            (m_sysConfig.batchSize * m_neuralNets.size() * m_sysConfig.queueScale) + (totalThreads * 4)
+            );
+
+        m_eventStorage.reserve(poolSize);
+        for (size_t i = 0; i < poolSize; ++i)
+        {
+            // Init Events avec params MCTS (history/depth)
+            m_eventStorage.emplace_back(mctsConfig.historySize, mctsConfig.maxDepth);
+            m_freeEvents.push(&m_eventStorage.back());
+        }
+
+        for (int i = 0; i < m_sysConfig.numBackpropThreads; ++i)
+            m_backpropThreads.emplace_back(&MCTSThreadPool::backpropLoop, this);
+
+        for (size_t gpuIdx = 0; gpuIdx < m_neuralNets.size(); ++gpuIdx)
+        {
+            for (size_t k = 0; k < m_sysConfig.numInferenceThreadsPerGPU; ++k)
+            {
+                m_inferenceThreads.emplace_back(&MCTSThreadPool::inferenceLoop, this, gpuIdx);
+            }
+        }
+
+        for (int i = 0; i < m_sysConfig.numSearchThreads; ++i)
+        {
+            m_gatherThreads.emplace_back(&MCTSThreadPool::gatherLoop, this);
+        }
+    }
+
+    ~MCTSThreadPool()
+    {
+        m_stopFlag = true;
+        m_draining = true;
+
+        m_freeEvents.signal_done();
+        m_evalQueue.signal_done();
+        m_backpropQueue.signal_done();
+
+        for (auto& t : m_gatherThreads) if (t.joinable()) t.join();
+        for (auto& t : m_inferenceThreads) if (t.joinable()) t.join();
+        for (auto& t : m_backpropThreads) if (t.joinable()) t.join();
+    }
+
+    void executeMCTS(MCTS<GameTag>* mcts, uint32_t numSimulations)
+    {
+        m_currentMCTS = mcts;
+        m_evalQueue.reset();
+        m_backpropQueue.reset();
+
+        m_targetSimulations.store(numSimulations, std::memory_order_relaxed);
+        m_draining = false;
+
+        {
+            std::unique_lock<std::mutex> lock(m_waitMutex);
+            while (mcts->getSimulationCount() < numSimulations)
+            {
+                m_waitCV.wait_for(lock, std::chrono::microseconds(500));
+            }
+        }
+
+        m_draining = true;
+
+        {
+            std::unique_lock<std::mutex> lock(m_waitMutex);
+            while (m_busyEvents.load(std::memory_order_relaxed) > 0)
+            {
+                m_waitCV.wait_for(lock, std::chrono::microseconds(500));
+            }
+        }
+
+        m_currentMCTS = nullptr;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+    }
 
 private:
-    // ============================================================================
-    // WORKER THREAD - Simplified
-    // ============================================================================
-
-    void workerThread(uint32_t threadId) {
-        WorkerContext& ctx = *m_workers[threadId];
-        uint32_t localBatchId = 0;
-
-        while (!m_stopFlag.load(std::memory_order_acquire)) {
+    void gatherLoop()
+    {
+        while (!m_stopFlag)
+        {
             MCTS<GameTag>* mcts = m_currentMCTS;
 
-            if (!mcts || !mcts->m_searchActive.load(std::memory_order_acquire)) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (!mcts || m_draining)
+            {
+                std::this_thread::yield();
                 continue;
             }
 
-            // CRITICAL: Mark as active at start
-            m_workersActive.fetch_add(1, std::memory_order_release);
-
-            try {
-                ctx.tld->reset();
-
-                // ================================================================
-                // SIMULATION PHASE
-                // ================================================================
-                while (mcts->m_searchActive.load(std::memory_order_acquire) &&
-                    !m_stopFlag.load(std::memory_order_acquire))
-                {
-                    if (mcts->m_simulationCount.load(std::memory_order_acquire) >=
-                        mcts->m_targetSimulations.load(std::memory_order_acquire)) {
-                        break;
-                    }
-
-                    bool canContinue = mcts->runSimulation(*ctx.tld);
-                    if (!canContinue) break;
-                }
-
-                // ================================================================
-                // DECIDE IF WE PARTICIPATE IN THIS BATCH
-                // ================================================================
-
-                bool hasWork = !ctx.tld->localBatch.empty();
-                bool searchActive = mcts->m_searchActive.load(std::memory_order_acquire);
-
-                // CRITICAL: Decrement active BEFORE barrier decision
-                m_workersActive.fetch_sub(1, std::memory_order_release);
-
-                if (!hasWork || !searchActive) {
-                    // No work - skip this batch entirely
-                    continue;
-                }
-
-                // ================================================================
-                // ADAPTIVE BARRIER - Phase 1: Announce participation
-                // ================================================================
-
-                // Announce we have work and will participate
-                uint32_t workersWithWork = m_workersWithWork.fetch_add(1, std::memory_order_acq_rel) + 1;
-
-                // Wait a bit for all workers to declare their intention
-                std::this_thread::sleep_for(std::chrono::microseconds(100));
-
-                // ================================================================
-                // ADAPTIVE BARRIER - Phase 2: Synchronize with participants only
-                // ================================================================
-
-                uint32_t expectedWorkers = m_workersWithWork.load(std::memory_order_acquire);
-                uint32_t arrived = m_workersWaiting.fetch_add(1, std::memory_order_acq_rel) + 1;
-
-                // Check if we're the coordinator (last to arrive)
-                bool isCoordinator = (arrived == expectedWorkers);
-
-                if (isCoordinator) {
-                    // Extra safety: ensure all workers are at barrier
-                    int spinCount = 0;
-                    while (m_workersWaiting.load(std::memory_order_acquire) < expectedWorkers
-                        && spinCount++ < 10000) {
-                        std::this_thread::yield();
-                    }
-
-                    if (m_workersWaiting.load(std::memory_order_acquire) != expectedWorkers) {
-                        std::cerr << "[Coordinator] WARNING: Not all workers arrived! Expected: "
-                            << expectedWorkers << ", Got: "
-                            << m_workersWaiting.load() << std::endl;
-                    }
-
-                    try {
-                        m_coordinationInProgress.store(true, std::memory_order_release);
-                        coordinatorPhase();
-                    }
-                    catch (const std::exception& e) {
-                        std::cerr << "[Coordinator] ERROR: " << e.what() << std::endl;
-                    }
-
-                    m_coordinationInProgress.store(false, std::memory_order_release);
-                    m_resultsReady.store(true, std::memory_order_release);
-                    m_syncCV.notify_all();
-                }
-                else {
-                    // Wait for coordinator
-                    std::unique_lock<std::mutex> lock(m_syncMutex);
-
-                    auto timeout = std::chrono::seconds(30);
-                    if (!m_syncCV.wait_for(lock, timeout, [this] {
-                        return m_resultsReady.load(std::memory_order_acquire) ||
-                            m_stopFlag.load(std::memory_order_acquire);
-                        })) {
-                        std::cerr << "[Worker " << threadId << "] TIMEOUT! Expected: "
-                            << expectedWorkers << ", Arrived: "
-                            << m_workersWaiting.load() << std::endl;
-
-                        // Emergency exit
-                        m_workersWaiting.fetch_sub(1, std::memory_order_acq_rel);
-                        m_workersWithWork.fetch_sub(1, std::memory_order_acq_rel);
-                        continue;
-                    }
-                }
-
-                if (m_stopFlag.load(std::memory_order_acquire)) {
-                    m_workersWaiting.fetch_sub(1, std::memory_order_acq_rel);
-                    m_workersWithWork.fetch_sub(1, std::memory_order_acq_rel);
-                    continue;
-                }
-
-                // ================================================================
-                // BACKPROPAGATION
-                // ================================================================
-                for (size_t i = 0; i < ctx.tld->localBatch.size(); ++i) {
-                    if (i < ctx.inferenceResults.size()) {
-                        mcts->backpropagate(ctx.tld->localBatch[i], ctx.inferenceResults[i]);
-                        mcts->m_simulationCount.fetch_add(1u, std::memory_order_relaxed);
-                    }
-                }
-                ctx.inferenceResults.clear();
-
-                // ================================================================
-                // BARRIER EXIT - Reset for next batch
-                // ================================================================
-                uint32_t remaining = m_workersWaiting.fetch_sub(1, std::memory_order_acq_rel) - 1;
-                m_workersWithWork.fetch_sub(1, std::memory_order_acq_rel);
-
-                if (remaining == 0) {
-                    // Last worker out resets the barrier
-                    m_resultsReady.store(false, std::memory_order_release);
-                    m_batchId.fetch_add(1, std::memory_order_release);
-                }
-
-            }
-            catch (const std::exception& e) {
-                std::cerr << "[Worker " << threadId << "] Exception: " << e.what() << std::endl;
-
-                // Emergency cleanup
-                uint32_t active = m_workersActive.load(std::memory_order_acquire);
-                uint32_t waiting = m_workersWaiting.load(std::memory_order_acquire);
-                uint32_t withWork = m_workersWithWork.load(std::memory_order_acquire);
-
-                if (active > 0) m_workersActive.fetch_sub(1, std::memory_order_release);
-                if (waiting > 0) m_workersWaiting.fetch_sub(1, std::memory_order_acq_rel);
-                if (withWork > 0) m_workersWithWork.fetch_sub(1, std::memory_order_acq_rel);
-            }
-            catch (...) {
-                std::cerr << "[Worker " << threadId << "] Unknown exception" << std::endl;
-
-                uint32_t active = m_workersActive.load(std::memory_order_acquire);
-                uint32_t waiting = m_workersWaiting.load(std::memory_order_acquire);
-                uint32_t withWork = m_workersWithWork.load(std::memory_order_acquire);
-
-                if (active > 0) m_workersActive.fetch_sub(1, std::memory_order_release);
-                if (waiting > 0) m_workersWaiting.fetch_sub(1, std::memory_order_acq_rel);
-                if (withWork > 0) m_workersWithWork.fetch_sub(1, std::memory_order_acq_rel);
-            }
-        }
-    }
-
-    // ============================================================================
-    // COORDINATOR PHASE - Collect batches and run inference
-    // ============================================================================
-
-    void coordinatorPhase() {
-        MCTS<GameTag>* mcts = m_currentMCTS;
-        if (!mcts) return;
-
-        // Count total simulations
-        uint32_t totalSims = 0;
-        for (auto& worker : m_workers) {
-            totalSims += static_cast<uint32_t>(worker->tld->localBatch.size());
-        }
-
-        if (totalSims == 0) return;
-
-        // Build unified batch
-        AlignedVec<IdxStateAction> batchHistory;
-        batchHistory.reserve(totalSims * m_historySize);
-
-        std::vector<std::pair<uint32_t, uint32_t>> simLocations;
-        simLocations.reserve(totalSims);
-
-        for (uint32_t wId = 0; wId < m_numThreads; ++wId) {
-            auto& worker = m_workers[wId];
-            for (uint32_t sId = 0; sId < worker->tld->localBatch.size(); ++sId) {
-                const auto& sim = worker->tld->localBatch[sId];
-
-                batchHistory.insert(batchHistory.end(),
-                    sim.historyCopy.begin(),
-                    sim.historyCopy.end());
-
-                simLocations.push_back({ wId, sId });
-            }
-        }
-
-        // Run inference
-        AlignedVec<ModelResults> results;
-        results.resize(totalSims);
-
-        try {
-            m_neuralNet->forwardBatch(batchHistory, results);
-        }
-        catch (const std::exception& e) {
-            std::cerr << "ERROR during inference: " << e.what() << std::endl;
-
-            // Clear all batches on error
-            for (auto& worker : m_workers) {
-                worker->tld->localBatch.clear();
-            }
-            return;
-        }
-
-        // Distribute results
-        for (uint32_t i = 0; i < totalSims; ++i) {
-            auto [workerId, localIdx] = simLocations[i];
-            const ModelResults& res = results[i];
-
-            AlignedVec<float> values(GT::kNumPlayers);
-            for (uint8_t p = 0; p < GT::kNumPlayers; ++p) {
-                values[p] = res.values[p];
-            }
-
-            m_workers[workerId]->inferenceResults.push_back(std::move(values));
-        }
-    }
-
-public:
-    // ============================================================================
-    // CONSTRUCTOR & DESTRUCTOR
-    // ============================================================================
-
-    MCTSThreadPool(std::shared_ptr<NeuralNet<GameTag>> neuralNet,
-        uint32_t batchSize,
-        uint8_t historySize,
-        uint16_t maxDepth,
-        uint8_t numThreads)
-        : m_neuralNet(std::move(neuralNet))
-        , m_batchSize(batchSize)
-        , m_historySize(historySize)
-        , m_maxDepth(maxDepth)
-        , m_numThreads(numThreads)
-    {
-        uint32_t perThreadCapacity = (batchSize + numThreads - 1) / numThreads;
-
-        m_workers.reserve(numThreads);
-        for (uint8_t i = 0; i < numThreads; ++i) {
-            m_workers.emplace_back(
-                std::make_unique<WorkerContext>(i, maxDepth, perThreadCapacity, historySize)
-            );
-        }
-
-        for (uint8_t i = 0; i < numThreads; ++i) {
-            m_workers[i]->thread = std::thread(&MCTSThreadPool::workerThread, this, i);
-        }
-
-        std::cout << "MCTSThreadPool initialized: " << static_cast<int>(numThreads)
-            << " threads, batch=" << batchSize << std::endl;
-    }
-
-    ~MCTSThreadPool() {
-        m_stopFlag.store(true, std::memory_order_release);
-        m_syncCV.notify_all();
-
-        for (auto& worker : m_workers) {
-            if (worker->thread.joinable()) {
-                worker->thread.join();
-            }
-        }
-    }
-
-    MCTSThreadPool(const MCTSThreadPool&) = delete;
-    MCTSThreadPool& operator=(const MCTSThreadPool&) = delete;
-
-    // ============================================================================
-    // PUBLIC INTERFACE
-    // ============================================================================
-
-    void clearWorkerCaches()
-    {
-        // Cette fonction n'a pas besoin d'être thread-safe car elle
-        // est appelée par le thread principal PENDANT que les workers sont inactifs.
-        for (auto& worker : m_workers)
-        {
-            if (worker && worker->tld)
+            Event* event = nullptr;
+            if (!m_freeEvents.pop(event))
             {
-                worker->tld->localFreeNodes.clear();
+                std::this_thread::yield();
+                continue;
+            }
+
+            m_busyEvents.fetch_add(1, std::memory_order_relaxed);
+
+            if (mcts->gatherWalk(*event))
+            {
+                m_evalQueue.push(event);
+            }
+            else
+            {
+                m_freeEvents.push(event);
+                m_busyEvents.fetch_sub(1, std::memory_order_relaxed);
+                std::this_thread::yield();
             }
         }
     }
 
-    void executeMCTS(MCTS<GameTag>* mcts, uint32_t numSimulations) {
-        if (mcts->m_rootIdx.load(std::memory_order_acquire) == UINT32_MAX) {
-            throw std::runtime_error("MCTS root not initialized");
-        }
+    void inferenceLoop(size_t netIndex)
+    {
+        AlignedVec<Event*> batch;
+        batch.reserve(m_sysConfig.batchSize);
 
-        // Reset all synchronization state
-        std::cout << "Resetting thread pool state..." << std::endl;
-        m_workersActive.store(0, std::memory_order_release);
-        m_workersWaiting.store(0, std::memory_order_release);
-        m_workersWithWork.store(0, std::memory_order_release);
-        m_resultsReady.store(false, std::memory_order_release);
-        m_coordinationInProgress.store(false, std::memory_order_release);
-        m_batchId.store(0, std::memory_order_release);
+        AlignedVec<IdxStateAction> nnInput;
+        nnInput.reserve(m_sysConfig.batchSize * 16);
 
-        if (!waitForIdle(10000)) {
-            std::cerr << "WARNING: Workers not idle before search!" << std::endl;
+        AlignedVec<ModelResults> nnOutput;
+        nnOutput.reserve(m_sysConfig.batchSize);
 
-            // Force stop
-            if (m_currentMCTS) {
-                m_currentMCTS->m_searchActive.store(false, std::memory_order_release);
-            }
-            m_syncCV.notify_all();
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        IdxAction idxAct;
+        const auto kWaitTimeout = std::chrono::microseconds(100);
 
-            // Force reset
-            m_workersActive.store(0, std::memory_order_release);
-            m_workersWaiting.store(0, std::memory_order_release);
-            m_workersWithWork.store(0, std::memory_order_release);
-            m_resultsReady.store(false, std::memory_order_release);
+        auto& myNet = m_neuralNets[netIndex];
+        auto& myMutex = *m_netMutexes[netIndex];
 
-            if (!waitForIdle(5000)) {
-                throw std::runtime_error("Cannot start search: workers stuck");
-            }
-        }
+        while (!m_stopFlag)
+        {
+            batch.clear();
+            // Utilisation de m_sysConfig.batchSize
+            size_t count = m_evalQueue.pop_batch_opportunistic(batch, m_sysConfig.batchSize, kWaitTimeout);
 
-        // Initialize search
-        mcts->m_targetSimulations.store(numSimulations, std::memory_order_release);
-        mcts->m_simulationCount.store(0u, std::memory_order_release);
-        mcts->cacheRootHistory();
+            if (count == 0) continue;
 
-        m_currentMCTS = mcts;
-
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        mcts->m_searchActive.store(true, std::memory_order_release);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-
-        m_syncCV.notify_all();
-
-        // Monitor progress
-        uint32_t lastCount = 0;
-        auto startTime = std::chrono::steady_clock::now();
-
-        while (true) {
-            uint32_t currentCount = mcts->m_simulationCount.load(std::memory_order_acquire);
-            if (currentCount >= numSimulations) break;
-
-            if (currentCount != lastCount && currentCount % 500 == 0) {
-                auto now = std::chrono::steady_clock::now();
-                auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - startTime).count();
-                float simsPerSec = (elapsedMs > 0) ? (currentCount * 1000.0f / elapsedMs) : 0.0f;
-
-                std::cout << "Progress: " << currentCount << "/" << numSimulations
-                    << " (" << static_cast<int>(simsPerSec) << " sims/s)" << std::endl;
-                lastCount = currentCount;
+            // Utilisation de m_sysConfig.fastDrain
+            if (m_draining && m_sysConfig.fastDrain)
+            {
+                for (size_t i = 0; i < count; ++i) m_freeEvents.push(batch[i]);
+                m_busyEvents.fetch_sub(count, std::memory_order_relaxed);
+                m_waitCV.notify_all();
+                continue;
             }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            MCTS<GameTag>* mcts = m_currentMCTS;
+            if (!mcts)
+            {
+                for (auto* e : batch) m_freeEvents.push(e);
+                m_busyEvents.fetch_sub(count, std::memory_order_relaxed);
+                m_waitCV.notify_all();
+                continue;
+            }
+
+            nnInput.clear();
+            for (size_t i = 0; i < count; ++i)
+            {
+                Event* e = batch[i];
+                if (!e->collision && !e->isTerminal)
+                {
+                    nnInput.insert(nnInput.end(), e->nnHistory.begin(), e->nnHistory.end());
+                }
+            }
+
+            nnOutput.assign(count, ModelResults());
+            if (!nnInput.empty())
+            {
+                std::lock_guard<std::mutex> lock(myMutex);
+                myNet->forwardBatch(nnInput, nnOutput);
+            }
+
+            size_t nnReadIdx = 0;
+            for (size_t i = 0; i < count; ++i)
+            {
+                Event* e = batch[i];
+                if (!e->collision && !e->isTerminal)
+                {
+                    if (nnReadIdx < nnOutput.size())
+                    {
+                        const auto& res = nnOutput[nnReadIdx++];
+                        m_engine->getValidActions(e->leafState, e->validActions);
+
+                        if (e->validActions.empty())
+                        {
+                            e->isTerminal = true;
+                            m_engine->isTerminal(e->leafState, e->values);
+                        }
+                        else
+                        {
+                            e->values = res.values;
+                            float sum = 0.0f;
+                            e->policy.clear();
+                            for (const auto& act : e->validActions)
+                            {
+                                m_engine->actionToIdx(act, idxAct);
+                                float p = 0.0f;
+                                if (idxAct.factIdx < res.policy.size()) p = res.policy[idxAct.factIdx];
+                                e->policy.push_back(p);
+                                sum += p;
+                            }
+                            if (sum > 1e-9f) {
+                                float norm = 1.0f / sum;
+                                for (float& p : e->policy) p *= norm;
+                            }
+                            else {
+                                float uniform = 1.0f / e->policy.size();
+                                for (float& p : e->policy) p = uniform;
+                            }
+                        }
+                    }
+                }
+                m_backpropQueue.push(e);
+            }
         }
-
-        // Stop search
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        mcts->m_searchActive.store(false, std::memory_order_release);
-        std::atomic_thread_fence(std::memory_order_seq_cst);
-        m_syncCV.notify_all();
-
-        if (!waitForIdle(30000)) {
-            std::cerr << "ERROR: Workers did not become idle after search!" << std::endl;
-            throw std::runtime_error("Thread pool synchronization failed");
-        }
-
-        auto endTime = std::chrono::steady_clock::now();
-        auto totalMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-            endTime - startTime).count();
-
-        std::cout << "Search complete: " << mcts->m_simulationCount.load()
-            << " sims in " << totalMs << "ms "
-            << "(" << (totalMs > 0 ? mcts->m_simulationCount.load() * 1000 / totalMs : 0)
-            << " sims/s)" << std::endl;
     }
 
-    bool waitForIdle(int timeoutMs = 10000) {
-        auto startTime = std::chrono::steady_clock::now();
+    void backpropLoop()
+    {
+        Event* event = nullptr;
+        while (!m_stopFlag)
+        {
+            if (!m_backpropQueue.pop(event))
+            {
+                if (m_draining && !m_stopFlag) std::this_thread::yield();
+                continue;
+            }
 
-        std::cout << "Waiting for workers to become idle..." << std::endl;
+            MCTS<GameTag>* mcts = m_currentMCTS;
+            if (mcts)
+            {
+                mcts->applyBackprop(*event);
+            }
+            m_freeEvents.push(event);
 
-        while (true) {
-            std::atomic_thread_fence(std::memory_order_seq_cst);
+            int remaining = m_busyEvents.fetch_sub(1, std::memory_order_relaxed) - 1;
+            bool notify = false;
 
-            uint32_t active = m_workersActive.load(std::memory_order_seq_cst);
-            uint32_t waiting = m_workersWaiting.load(std::memory_order_seq_cst);
-            uint32_t withWork = m_workersWithWork.load(std::memory_order_seq_cst);
-            bool coordinating = m_coordinationInProgress.load(std::memory_order_acquire);
-
-            // Idle = no workers active, none waiting, none with work, no coordination
-            if (active == 0 && waiting == 0 && withWork == 0 && !coordinating) {
-                // Double-check
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-                std::atomic_thread_fence(std::memory_order_seq_cst);
-                active = m_workersActive.load(std::memory_order_seq_cst);
-                waiting = m_workersWaiting.load(std::memory_order_seq_cst);
-                withWork = m_workersWithWork.load(std::memory_order_seq_cst);
-                coordinating = m_coordinationInProgress.load(std::memory_order_acquire);
-
-                if (active == 0 && waiting == 0 && withWork == 0 && !coordinating) {
-                    std::cout << "Workers are now idle." << std::endl;
-                    return true;
+            if (remaining == 0) notify = true;
+            if (!notify && mcts) {
+                if (mcts->getSimulationCount() >= m_targetSimulations.load(std::memory_order_relaxed)) {
+                    notify = true;
                 }
             }
 
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                now - startTime).count();
-
-            if (elapsed > timeoutMs) {
-                std::cerr << "ERROR: Timeout after " << timeoutMs << "ms" << std::endl;
-                std::cerr << "  Active: " << active << std::endl;
-                std::cerr << "  Waiting: " << waiting << std::endl;
-                std::cerr << "  WithWork: " << withWork << std::endl;
-                std::cerr << "  Coordinating: " << (coordinating ? "yes" : "no") << std::endl;
-
-                // Emergency cleanup
-                if (waiting > 0) {
-                    std::cerr << "Forcing barrier release..." << std::endl;
-                    m_resultsReady.store(true, std::memory_order_release);
-                    m_syncCV.notify_all();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-                    // Reset everything
-                    m_workersWaiting.store(0, std::memory_order_release);
-                    m_workersWithWork.store(0, std::memory_order_release);
-                    m_resultsReady.store(false, std::memory_order_release);
-                }
-
-                return false;
+            if (notify) {
+                m_waitCV.notify_all();
             }
-
-            if (elapsed % 1000 < 20) {
-                std::cout << "Still waiting... (Active: " << active
-                    << ", Waiting: " << waiting
-                    << ", WithWork: " << withWork << ")" << std::endl;
-            }
-
-            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
     }
 };
-
-// ============================================================================
-// IMPLEMENTATION OF MCTS::run
-// ==================================================== ========================
-
-template<typename GameTag>
-void MCTS<GameTag>::run(uint32_t numSimulations, MCTSThreadPool<GameTag>& pool) {
-    pool.executeMCTS(this, numSimulations);
-}

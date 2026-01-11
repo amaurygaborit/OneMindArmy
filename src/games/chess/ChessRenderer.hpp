@@ -36,7 +36,8 @@ private:
 	};
 	static constexpr const char* kPromosLetter[5] = { "", "q", "r", "b", "n" };
 
-	bool m_isRenderRawState = false;
+	bool m_renderRawState = false;
+	bool m_replaceRendering = false;
 
 private:
 	void dispBoard(uint64_t board) const;

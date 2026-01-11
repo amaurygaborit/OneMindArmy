@@ -8,8 +8,8 @@ protected:
 	using GT = ITraits<GameTag>;
 	using ObsState = typename ObsStateT<GameTag>;
 	using Action = typename ActionT<GameTag>;
-	using IdxState = typename IdxStateT<GameTag>;
 	using IdxAction = typename IdxActionT<GameTag>;
+	using IdxState = typename IdxStateT<GameTag>;
 
 	std::shared_ptr<IEngine<GameTag>> m_engine;
 

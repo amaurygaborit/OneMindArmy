@@ -1,26 +1,38 @@
 ﻿#include <iostream>
 #include <bitset>
+#include <limits>
 #ifdef _WIN32
-    #include <windows.h>
+#include <windows.h>
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
 #endif
 
 #include "ChessRenderer.hpp"
 
 ChessRenderer::ChessRenderer()
 {
-    #ifdef _WIN32
-        SetConsoleOutputCP(CP_UTF8);
-    #endif
+#ifdef _WIN32
+    // Active l'UTF-8
+    SetConsoleOutputCP(CP_UTF8);
+
+    // Active les séquences ANSI sur Windows (couleurs, curseur)
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD dwMode = 0;
+    if (hOut != INVALID_HANDLE_VALUE && GetConsoleMode(hOut, &dwMode))
+    {
+        dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+        SetConsoleMode(hOut, dwMode);
+    }
+#endif
 }
 
 void ChessRenderer::specificSetup(const YAML::Node& config)
 {
     std::cout << "ChessRenderer setup called\n";
 
-    if (!config["gameSpecific"]["renderRawState"])
-        throw std::runtime_error("Configuration missing 'gameSpecific.renderRawState' field");
-
-    m_isRenderRawState = config["gameSpecific"]["renderRawState"].as<bool>();
+    m_renderRawState = loadVal<bool>(config["specific"]["render"], "renderRawState", 0, 1);
+    m_replaceRendering = loadVal<bool>(config["specific"]["render"], "replaceRendering", 0, 1);
 }
 
 void ChessRenderer::dispBoard(uint64_t board) const
@@ -72,10 +84,10 @@ void ChessRenderer::renderRawState(const ObsState& obsState) const
 
 void ChessRenderer::renderState(const ObsState& obsState) const
 {
-    if (m_isRenderRawState)
+    if (m_renderRawState)
         renderRawState(obsState);
 
-    if (!m_isRenderState)
+    if (!m_baseConfig.renderState)
         return;
 
     // Display title in bold
@@ -150,25 +162,34 @@ void ChessRenderer::renderState(const ObsState& obsState) const
 
 void ChessRenderer::renderValidActions(const ObsState& obsState) const
 {
-    if (!m_isRenderValidActions)
+    if (!m_baseConfig.renderValidActions)
         return;
 
     AlignedVec<Action> validActions(reserve_only, GT::kMaxValidActions);
     m_engine->getValidActions(obsState, validActions);
 
-    std::cout << "Legal move:" << std::endl;
+    std::cout << "Legal moves (" << validActions.size() << "):" << std::endl;
     for (int i = 0; i < validActions.size(); ++i)
     {
         int start = validActions[i].from();
         int dest = validActions[i].to();
         int promo = validActions[i].promo();
-        std::cout << kSquaresName[start] << kSquaresName[dest] << kPromosLetter[promo] << std::endl;
+        std::cout << kSquaresName[start] << kSquaresName[dest] << kPromosLetter[promo] << " ";
+        // Petit retour à la ligne cosmétique tous les 8 coups pour éviter les lignes trop longues
+        if ((i + 1) % 8 == 0) std::cout << "\n";
     }
+    std::cout << std::endl;
 }
 
 void ChessRenderer::renderActionPlayed(const Action& action, const size_t player) const
 {
-    if (!m_isRenderActionPlayed)
+    if (m_replaceRendering)
+    {
+        std::cout << "\033[u" << "\033[0J";
+        std::cout << "\033[s";
+    }
+
+    if (!m_baseConfig.renderActionPlayed || action.data == 0)
         return;
 
     std::cout << kColor[player] << " played: "
@@ -179,8 +200,8 @@ void ChessRenderer::renderActionPlayed(const Action& action, const size_t player
 
 void ChessRenderer::renderResult(const ObsState& obsState) const
 {
-    if (!m_isRenderResult)
+    if (!m_baseConfig.renderResult)
         return;
 
-
+    std::cout << "\n=== End of Game ===\n";
 }
