@@ -48,7 +48,7 @@ The framework revolves around a **GameTypeRegistry** that injects dependencies i
 
 1. Clone the repository
 ```bash
-git clone [https://github.com/amaurygaborit/OneMindArmy.git](https://github.com/amaurygaborit/OneMindArmy.git)
+git clone https://github.com/amaurygaborit/OneMindArmy.git
 ```
 ```bash
 cd OneMindArmy
@@ -56,7 +56,7 @@ cd OneMindArmy
 
 2. Clone external dependencies (YAML-CPP, etc.)
 ```bash
-git clone --depth 1 [https://github.com/jbeder/yaml-cpp.git](https://github.com/jbeder/yaml-cpp.git) external/yaml-cpp
+git clone https://github.com/jbeder/yaml-cpp.git external/yaml-cpp
 ```
 
 3. Configure and Build
