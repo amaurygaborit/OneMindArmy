@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "../../corelib/interfaces/ITraits.hpp"
 #include <cstdint>
 
@@ -40,3 +40,18 @@ struct ITraits<TarotTag>
         };
     };
 };
+
+
+/*
+
+Dans ReBeL, un infoset est défini par :
+I = (PBS, player_to_act)
+PBS = public state + belief implicite
+
+Pour chaque infoset I :
+Regrets cumulés
+Stratégie courante
+Stratégie moyenne
+⚠️ Il n’y a PAS de Q(s,a) comme en MCTS.
+
+*/

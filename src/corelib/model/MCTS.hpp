@@ -17,14 +17,16 @@ template<typename GameTag> class MCTSThreadPool;
 template<typename GameTag>
 struct NodeEvent
 {
-    using ObsState = typename ObsStateT<GameTag>;
-    using IdxStateAction = typename IdxStateActionT<GameTag>;
-    using Action = typename ActionT<GameTag>;
+	using GT = ITraits<GameTag>;
+    using ObsState = typename GT::ObsState;
+    using FactStateAction = typename FactStateActionT<GameTag>;
+    using FactAction = typename Fact<GameTag>;
+    using Action = typename GT::Action;
 
     // --- IDENTITÉ & CONTEXTE ---
     uint32_t leafNodeIdx;
     AlignedVec<uint32_t> path;
-    AlignedVec<uint8_t> pathPlayers; // Pour revert VirtualLoss correctement
+    AlignedVec<uint8_t> pathPlayers;
 
     // --- ÉTAT ---
     ObsState leafState;
@@ -32,7 +34,11 @@ struct NodeEvent
     bool collision;
 
     // --- DONNÉES POUR L'INFÉRENCE ---
-    AlignedVec<IdxStateAction> nnHistory;
+    // On stocke les Facts d'actions collectés pendant la descente
+    AlignedVec<FactAction> pathActionFacts;
+
+    // L'historique complet prêt pour le réseau de neurones
+    AlignedVec<FactStateAction> nnHistory;
 
     // --- RÉSULTATS ---
     AlignedVec<Action> validActions;
@@ -43,10 +49,13 @@ struct NodeEvent
     {
         path.reserve(maxDepth);
         pathPlayers.reserve(maxDepth);
+        pathActionFacts.reserve(maxDepth);
+
         nnHistory.reserve(historySize);
-        validActions.reserve(ITraits<GameTag>::kMaxValidActions);
-        policy.reserve(ITraits<GameTag>::kActionSpace);
-        values.reserve(ITraits<GameTag>::kNumPlayers);
+
+        validActions.reserve(GT::kMaxValidActions);
+        policy.reserve(GT::kActionSpace);
+        values.reserve(GT::kNumPlayers);
         reset();
     }
 
@@ -55,8 +64,11 @@ struct NodeEvent
         leafNodeIdx = 0;
         path.clear();
         pathPlayers.clear();
+        pathActionFacts.clear();
+
         isTerminal = false;
         collision = false;
+
         nnHistory.clear();
         validActions.clear();
         policy.clear();
@@ -69,10 +81,13 @@ class MCTS
 {
 public:
     using GT = ITraits<GameTag>;
-    using ObsState = typename ObsStateT<GameTag>;
-    using Action = typename ActionT<GameTag>;
-    using IdxAction = typename IdxActionT<GameTag>;
-    using IdxStateAction = typename IdxStateActionT<GameTag>;
+    using ObsState = typename GT::ObsState;
+    using Action = typename GT::Action;
+
+    using FactState = typename FactStateT<GameTag>;
+    using FactAction = typename Fact<GameTag>;
+    using FactStateAction = typename FactStateActionT<GameTag>;
+
     using ModelResults = typename ModelResultsT<GameTag>;
     using Event = NodeEvent<GameTag>;
 
@@ -84,7 +99,6 @@ private:
 
     std::shared_ptr<IEngine<GameTag>> m_engine;
 
-    // Config Moteur (maxNodes, reuseTree, cPUCT...)
     const MCTSConfig m_config;
 
     // Arbre (Structure of Arrays)
@@ -96,13 +110,15 @@ private:
     AlignedVec<uint32_t> m_nodeFirstChild;
     AlignedVec<uint16_t> m_nodeNumChildren;
     AlignedVec<Action>   m_nodeAction;
-    AlignedVec<ObsState> m_nodeStates;
+    AlignedVec<ObsState> m_nodeStates; // Stocke uniquement la racine (généralement)
 
     // État courant
     std::atomic<uint32_t>      m_nodeCount{ 0 };
     std::atomic<uint32_t>      m_finishedSimulations{ 0 };
     uint32_t                   m_rootIdx = UINT32_MAX;
-    AlignedVec<IdxStateAction> m_rootHistory;
+
+    // Historique à la racine (Invariant pour tout l'arbre)
+    AlignedVec<FactStateAction> m_rootHistory;
 
     void allocateMemory()
     {
@@ -168,31 +184,8 @@ private:
         m_nodeN[nodeIdx].fetch_add(1, std::memory_order_relaxed);
         for (uint8_t p = 0; p < kNumPlayers; ++p)
         {
-            // Si c'est le joueur courant, on diminue sa valeur (défaite virtuelle)
             float loss = (p == player) ? -m_config.virtualLoss : m_config.virtualLoss;
             m_nodeW[p][nodeIdx].fetch_add(loss, std::memory_order_relaxed);
-        }
-    }
-
-    void revertVirtualLoss(const AlignedVec<uint32_t>& path, const AlignedVec<uint8_t>& players)
-    {
-        // Revert spécifique avec tracking des joueurs (Lc0 style)
-        // path[0] est la racine. players[0] est le joueur qui a choisi path[1].
-        // La VL a été appliquée sur path[i] (l'enfant) avec le joueur players[i-1] (le parent).
-        // Dans gatherWalk, on push le joueur courant AVANT de descendre.
-
-        size_t len = path.size();
-        for (size_t i = 0; i < len; ++i)
-        {
-            uint32_t nodeIdx = path[i];
-            uint8_t p = players[i];
-
-            m_nodeN[nodeIdx].fetch_sub(1, std::memory_order_relaxed);
-
-            float loss = (p == p) ? -m_config.virtualLoss : m_config.virtualLoss; // Simplification logique, revert exactement
-            // NOTE: Pour simplifier et éviter les bugs de logique, on fait l'inverse exact de applyVirtualLoss :
-            // m_nodeW[p] -= -loss  => m_nodeW[p] += loss
-            m_nodeW[p][nodeIdx].fetch_sub(loss, std::memory_order_relaxed);
         }
     }
 
@@ -236,26 +229,29 @@ private:
         return bestChild;
     }
 
-    void prepareHistory(const AlignedVec<uint32_t>& path, AlignedVec<IdxStateAction>& outHist)
+    // Assemble l'historique final (Root History + Path Actions)
+    void prepareHistory(const AlignedVec<FactAction>& pathActions, AlignedVec<FactStateAction>& outHist)
     {
         outHist.clear();
         size_t rootHistSize = m_rootHistory.size();
-        size_t pathSize = path.size();
-        size_t totalItems = rootHistSize + (pathSize > 0 ? pathSize - 1 : 0);
+        size_t pathSize = pathActions.size();
+        size_t totalItems = rootHistSize + pathSize;
         size_t needed = m_config.historySize;
 
+        // 1. Padding si nécessaire
         if (totalItems < needed)
         {
             size_t padCount = needed - totalItems;
-            IdxStateAction padItem;
-            padItem.idxAction = Fact<GameTag>::MakePad(FactType::ACTION);
-            padItem.idxState.elemFacts.fill(Fact<GameTag>::MakePad(FactType::ELEMENT));
+            FactStateAction padItem;
+            // Par défaut FactStateAction est vide/pad
             for (size_t i = 0; i < padCount; ++i) outHist.push_back(padItem);
         }
 
+        // 2. Calcul du point de départ (fenêtre glissante)
         size_t startOffset = (totalItems > needed) ? (totalItems - needed) : 0;
         size_t currentIdx = 0;
 
+        // 3. Ajout Root History
         for (size_t i = 0; i < rootHistSize; ++i)
         {
             if (outHist.size() == needed) break;
@@ -265,15 +261,17 @@ private:
             }
             currentIdx++;
         }
-        for (size_t i = 1; i < pathSize; ++i)
+
+        // 4. Ajout Path History (Actions récentes)
+        for (size_t i = 0; i < pathSize; ++i)
         {
             if (outHist.size() == needed) break;
             if (currentIdx >= startOffset)
             {
-                IdxStateAction pathItem;
-                pathItem.idxState.elemFacts.fill(Fact<GameTag>::MakePad(FactType::ELEMENT));
-                uint32_t nodeIdx = path[i];
-                m_engine->actionToIdx(m_nodeAction[nodeIdx], pathItem.idxAction);
+                FactStateAction pathItem;
+                // On met juste l'action, l'état reste PAD (Frame Stacking Action-Only pour les nœuds internes)
+                // Ou alors ton architecture prévoit de remplir 'stateFacts' avec des placeholders.
+                pathItem.actionFact = pathActions[i];
                 outHist.push_back(pathItem);
             }
             currentIdx++;
@@ -301,8 +299,6 @@ public:
         deallocateMemory();
     }
 
-    // --- ACCESSEURS PUBLICS ---
-
     std::shared_ptr<IEngine<GameTag>> getEngine() const { return m_engine; }
 
     uint32_t getSimulationCount() const {
@@ -319,6 +315,8 @@ public:
         event.path.push_back(m_rootIdx);
 
         uint32_t currIdx = m_rootIdx;
+
+        // Copie locale de l'état pour la traversée
         ObsState currState = m_nodeStates[m_rootIdx];
 
         size_t player = m_engine->getCurrentPlayer(currState);
@@ -331,6 +329,7 @@ public:
         {
             uint8_t flags = m_nodeFlags[currIdx].load(std::memory_order_acquire);
 
+            // Cas Terminal
             if (flags & FLAG_TERMINAL)
             {
                 event.leafNodeIdx = currIdx;
@@ -340,6 +339,7 @@ public:
                 return true;
             }
 
+            // Cas Feuille non étendue -> On demande l'évaluation
             if (!(flags & FLAG_EXPANDED))
             {
                 uint8_t expected = flags;
@@ -353,7 +353,9 @@ public:
                         event.leafNodeIdx = currIdx;
                         event.leafState = currState;
                         event.isTerminal = false;
-                        prepareHistory(event.path, event.nnHistory);
+
+                        // C'est le moment de construire l'historique pour le NN
+                        prepareHistory(event.pathActionFacts, event.nnHistory);
                         return true;
                     }
                 }
@@ -362,9 +364,11 @@ public:
                 return true;
             }
 
+            // Sélection
             uint32_t bestChild = selectBestChild(currIdx, currState);
             if (bestChild == UINT32_MAX)
             {
+                // Pas d'enfant valide -> Terminal
                 m_nodeFlags[currIdx].fetch_or(FLAG_TERMINAL, std::memory_order_release);
                 event.leafNodeIdx = currIdx;
                 event.isTerminal = true;
@@ -372,12 +376,19 @@ public:
                 return true;
             }
 
+            // --- CRITICAL STEP: CONVERSION ACTION TO FACT ---
+            // On convertit l'action MAINTENANT car on possède 'currState' (le contexte).
+            // Si on attend la fin de la boucle, on aura perdu les états intermédiaires.
+            FactAction actFact;
+            const Action& nextAction = m_nodeAction[bestChild];
+            m_engine->actionToFact(nextAction, currState, actFact);
+            event.pathActionFacts.push_back(actFact);
+
             // Avancer
-            applyVirtualLoss(bestChild, player); // Note: on utilise le joueur courant (parent) pour VL
-            m_engine->applyAction(m_nodeAction[bestChild], currState);
+            applyVirtualLoss(bestChild, player);
+            m_engine->applyAction(nextAction, currState); // currState mute ici
             currIdx = bestChild;
 
-            // Nouveau joueur
             player = m_engine->getCurrentPlayer(currState);
             event.path.push_back(currIdx);
             event.pathPlayers.push_back(static_cast<uint8_t>(player));
@@ -402,7 +413,7 @@ public:
             return;
         }
 
-        // Revert Virtual Loss avant update
+        // Revert Virtual Loss
         size_t len = event.path.size();
         for (size_t i = 0; i < len; ++i) {
             uint32_t idx = event.path[i];
@@ -463,9 +474,10 @@ public:
         m_finishedSimulations.store(0, std::memory_order_relaxed);
         m_rootHistory.clear();
 
-        IdxStateAction rootItem;
-        m_engine->obsToIdx(rootState, rootItem.idxState);
-        rootItem.idxAction = Fact<GameTag>::MakePad(FactType::ACTION);
+        // Construction de l'élément initial de l'historique
+        FactStateAction rootItem;
+        m_engine->stateToFacts(rootState, rootItem.stateFacts);
+        rootItem.actionFact.clear(); // Pas d'action précédente, PAD
         m_rootHistory.push_back(rootItem);
 
         m_rootIdx = allocNode();
@@ -475,15 +487,20 @@ public:
         }
     }
 
-    // --- IMPLÉMENTATION DU REUSE TREE ---
     void advanceRoot(const Action& actionPlayed, const ObsState& newState)
     {
-        // 1. Mise à jour de l'historique (Nécessaire même si on reset)
+        // 1. Mise à jour de l'historique
         if (m_rootIdx != UINT32_MAX)
         {
-            typename NodeEvent<GameTag>::IdxStateAction histItem;
-            m_engine->obsToIdx(m_nodeStates[m_rootIdx], histItem.idxState);
-            m_engine->actionToIdx(actionPlayed, histItem.idxAction);
+            FactStateAction histItem;
+            // On utilise l'état précédent (stocké à la racine) pour contextualiser l'action
+            ObsState prevState = m_nodeStates[m_rootIdx];
+
+            // Pour l'historique, on sauvegarde l'état complet
+            m_engine->stateToFacts(prevState, histItem.stateFacts);
+            // Et l'action qui a mené à newState
+            m_engine->actionToFact(actionPlayed, prevState, histItem.actionFact);
+
             m_rootHistory.push_back(histItem);
         }
 
@@ -509,22 +526,19 @@ public:
 
             if (nextRoot != UINT32_MAX)
             {
-                // SUCCÈS : On a trouvé l'enfant, on conserve l'arbre
                 m_rootIdx = nextRoot;
-                m_nodeStates[m_rootIdx] = newState; // Sécurité : on met à jour l'état exact
+                m_nodeStates[m_rootIdx] = newState;
                 m_finishedSimulations.store(0, std::memory_order_relaxed);
 
-                // Vérif mémoire après promotion
                 if (isMemoryFull()) {
                     auto savedHist = m_rootHistory;
                     startSearch(newState);
                     m_rootHistory = std::move(savedHist);
                 }
-                return; // Sortie anticipée : on a réutilisé l'arbre
+                return;
             }
         }
 
-        // 3. Fallback (Pas de reuse ou Enfant non trouvé ou Reset forcé)
         auto savedHist = m_rootHistory;
         startSearch(newState);
         m_rootHistory = std::move(savedHist);
@@ -534,7 +548,7 @@ public:
     {
         if (m_rootIdx == UINT32_MAX || m_nodeNumChildren[m_rootIdx] == 0)
         {
-            out = Action{};
+            out = Action{}; // Default constructible action
             return;
         }
 
@@ -595,5 +609,10 @@ public:
     {
         return m_nodeCount.load(std::memory_order_relaxed) >=
             static_cast<uint32_t>(m_config.maxNodes * m_config.memoryThreshold);
+    }
+
+    float getMemoryUsage() const
+    {
+        return static_cast<float>(m_nodeCount.load(std::memory_order_relaxed)) / static_cast<float>(m_config.maxNodes);
     }
 };

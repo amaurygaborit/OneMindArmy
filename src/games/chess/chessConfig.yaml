@@ -9,12 +9,12 @@ backend:
     maxBatchSize: 256
   
   threading:
-    numSearchThreads: 8
+    numSearchThreads: 4
     numBackpropThreads: 2
     numInferenceThreads: 1
   
   optimization:
-    queueScale: 2.0
+    queueScale: 3.0
     fastDrain: true
 
 # ==========================================
@@ -22,14 +22,15 @@ backend:
 # ==========================================
 engine:
   memory:
-    maxNodes: 20000000
+    maxNodes: 1000000
     memoryThreshold: 0.90
     reuseTree: true
 
   search:
     maxDepth: 128
     cPUCT: 1.5
-    virtualLoss: 1.0
+    dirichletAlpha: 0.3
+    virtualLoss: 3.0
 
   network:
     historySize: 8
@@ -43,7 +44,7 @@ session:
     autoInitialState: true
 
   timeControl:
-    numSimulations: 10000
+    numSimulations: 800
 
   strategy:
     temperature: 1.0

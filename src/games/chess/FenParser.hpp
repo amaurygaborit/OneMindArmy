@@ -16,11 +16,13 @@ public:
 /// @brief Parseur FEN (Forsyth-Edwards Notation) pour les échecs
 class FenParser {
 public:
+    using ObsState = typename ITraits<ChessTag>::ObsState;
+
     /// @brief Parse une notation FEN et remplit l'état observable
     /// @param fen La chaîne FEN à parser
     /// @param out L'état de sortie à remplir
     /// @return true si le parsing a réussi, false sinon
-    [[nodiscard]] static bool tryGetFenState(std::string_view fen, ObsStateT<ChessTag>& out) noexcept {
+    [[nodiscard]] static bool tryGetFenState(std::string_view fen, ObsState& out) noexcept {
         try {
             getFenState(fen, out);
             return true;
@@ -34,9 +36,9 @@ public:
     /// @param fen La chaîne FEN à parser
     /// @param out L'état de sortie à remplir
     /// @throws InvalidFenException si le FEN est invalide
-    static void getFenState(std::string_view fen, ObsStateT<ChessTag>& out) {
+    static void getFenState(std::string_view fen, ObsState& out) {
         // Reset the state
-        out = ObsStateT<ChessTag>{};
+        out = ObsState{};
 
         if (fen.empty()) {
             throw InvalidFenException("FEN string is empty");
@@ -85,7 +87,7 @@ private:
     }
 
     /// @brief Parse la position des pièces (champ 1)
-    static void parsePiecePosition(std::string_view position, ObsStateT<ChessTag>& out) {
+    static void parsePiecePosition(std::string_view position, ObsState& out) {
         int file = 0;  // Column (0-7)
         int rank = 7;  // Row (7-0, from top to bottom)
         int rankCount = 0;
@@ -147,7 +149,7 @@ private:
     }
 
     /// @brief Parse le joueur actif (champ 2)
-    static void parseActiveColor(std::string_view color, ObsStateT<ChessTag>& out) {
+    static void parseActiveColor(std::string_view color, ObsState& out) {
         if (color.size() != 1) {
             throw InvalidFenException("Active color must be 'w' or 'b'");
         }
@@ -164,7 +166,7 @@ private:
     }
 
     /// @brief Parse les droits de roque (champ 3)
-    static void parseCastlingRights(std::string_view castling, ObsStateT<ChessTag>& out) {
+    static void parseCastlingRights(std::string_view castling, ObsState& out) {
         if (castling.empty()) {
             throw InvalidFenException("Castling rights field is empty");
         }
@@ -208,7 +210,7 @@ private:
     }
 
     /// @brief Parse la case en passant (champ 4)
-    static void parseEnPassantSquare(std::string_view enPassant, ObsStateT<ChessTag>& out) {
+    static void parseEnPassantSquare(std::string_view enPassant, ObsState& out) {
         if (enPassant.empty()) {
             throw InvalidFenException("En passant field is empty");
         }
@@ -244,7 +246,7 @@ private:
     }
 
     /// @brief Parse le compteur de demi-coups (champ 5)
-    static void parseHalfmoveClock(std::string_view halfmove, ObsStateT<ChessTag>& out) {
+    static void parseHalfmoveClock(std::string_view halfmove, ObsState& out) {
         if (halfmove.empty()) {
             throw InvalidFenException("Halfmove clock field is empty");
         }
@@ -264,7 +266,7 @@ private:
     }
 
     /// @brief Parse le numéro de coup complet (champ 6)
-    static void parseFullmoveNumber(std::string_view fullmove, ObsStateT<ChessTag>& out) {
+    static void parseFullmoveNumber(std::string_view fullmove, ObsState& out) {
         if (fullmove.empty()) {
             throw InvalidFenException("Fullmove number field is empty");
         }

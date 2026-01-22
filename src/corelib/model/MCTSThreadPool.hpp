@@ -13,8 +13,8 @@ class MCTSThreadPool
 {
 public:
     using Event = NodeEvent<GameTag>;
-    using IdxAction = typename MCTS<GameTag>::IdxAction;
-    using IdxStateAction = typename MCTS<GameTag>::IdxStateAction;
+    using FactAction = typename MCTS<GameTag>::FactAction;
+    using FactStateAction = typename MCTS<GameTag>::FactStateAction;
     using ModelResults = typename MCTS<GameTag>::ModelResults;
 
 private:
@@ -95,7 +95,6 @@ private:
     AlignedVec<std::unique_ptr<NeuralNet<GameTag>>> m_neuralNets;
     AlignedVec<std::unique_ptr<std::mutex>> m_netMutexes;
 
-    // Configuration Système (Backend)
     const SystemConfig m_sysConfig;
 
     AlignedVec<Event> m_eventStorage;
@@ -117,7 +116,7 @@ public:
     MCTSThreadPool(std::shared_ptr<IEngine<GameTag>> engine,
         AlignedVec<std::unique_ptr<NeuralNet<GameTag>>>&& neuralNets,
         const SystemConfig& sysConfig,
-        const MCTSConfig& mctsConfig) // MCTSConfig pour l'init des Events
+        const MCTSConfig& mctsConfig)
         : m_engine(std::move(engine)),
         m_neuralNets(std::move(neuralNets)),
         m_sysConfig(sysConfig)
@@ -132,7 +131,6 @@ public:
         size_t totalInferenceThreads = m_neuralNets.size() * m_sysConfig.numInferenceThreadsPerGPU;
         size_t totalThreads = m_sysConfig.numSearchThreads + totalInferenceThreads + m_sysConfig.numBackpropThreads;
 
-        // Note: BatchSize est maintenant dans sysConfig
         size_t poolSize = static_cast<size_t>(
             (m_sysConfig.batchSize * m_neuralNets.size() * m_sysConfig.queueScale) + (totalThreads * 4)
             );
@@ -140,7 +138,6 @@ public:
         m_eventStorage.reserve(poolSize);
         for (size_t i = 0; i < poolSize; ++i)
         {
-            // Init Events avec params MCTS (history/depth)
             m_eventStorage.emplace_back(mctsConfig.historySize, mctsConfig.maxDepth);
             m_freeEvents.push(&m_eventStorage.back());
         }
@@ -247,13 +244,12 @@ private:
         AlignedVec<Event*> batch;
         batch.reserve(m_sysConfig.batchSize);
 
-        AlignedVec<IdxStateAction> nnInput;
+        AlignedVec<FactStateAction> nnInput;
         nnInput.reserve(m_sysConfig.batchSize * 16);
 
         AlignedVec<ModelResults> nnOutput;
         nnOutput.reserve(m_sysConfig.batchSize);
 
-        IdxAction idxAct;
         const auto kWaitTimeout = std::chrono::microseconds(100);
 
         auto& myNet = m_neuralNets[netIndex];
@@ -262,12 +258,10 @@ private:
         while (!m_stopFlag)
         {
             batch.clear();
-            // Utilisation de m_sysConfig.batchSize
             size_t count = m_evalQueue.pop_batch_opportunistic(batch, m_sysConfig.batchSize, kWaitTimeout);
 
             if (count == 0) continue;
 
-            // Utilisation de m_sysConfig.fastDrain
             if (m_draining && m_sysConfig.fastDrain)
             {
                 for (size_t i = 0; i < count; ++i) m_freeEvents.push(batch[i]);
@@ -325,9 +319,11 @@ private:
                             e->policy.clear();
                             for (const auto& act : e->validActions)
                             {
-                                m_engine->actionToIdx(act, idxAct);
+                                // On utilise actionToIdx pour mapper l'action valide
+                                // vers l'index de sortie du réseau (Policy Vector)
+                                uint32_t idx = m_engine->actionToIdx(act);
                                 float p = 0.0f;
-                                if (idxAct.factIdx < res.policy.size()) p = res.policy[idxAct.factIdx];
+                                if (idx < res.policy.size()) p = res.policy[idx];
                                 e->policy.push_back(p);
                                 sum += p;
                             }

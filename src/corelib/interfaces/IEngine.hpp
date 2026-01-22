@@ -9,11 +9,11 @@ template<typename GameTag>
 class IEngine
 {
 protected:
-	using GT = ITraits<GameTag>;
-    using ObsState = typename ObsStateT<GameTag>;
-    using Action = typename ActionT<GameTag>;
-    using IdxState = typename IdxStateT<GameTag>;
-    using IdxAction = typename IdxActionT<GameTag>;
+    using GT = ITraits<GameTag>;
+    using ObsState = typename GT::ObsState;
+    using Action = typename GT::Action;
+    using FactState = typename FactStateT<GameTag>;
+    using FactAction = typename Fact<GameTag>;
 
     virtual void specificSetup(const YAML::Node& config) = 0;
 
@@ -33,9 +33,10 @@ public:
     virtual void applyAction(const Action& action, ObsState& out) const = 0;
     virtual bool isTerminal(const ObsState& obsState, AlignedVec<float>& out) const = 0;
 
-    virtual void obsToIdx(const ObsState& obsState, IdxState& out) const = 0;
-    virtual void idxToObs(const IdxState& idxInput, ObsState& out) const = 0;
+    // --- Converters ---
+    virtual void stateToFacts(const ObsState& obsState, FactState& out) const = 0;
+    virtual void actionToFact(const Action& action, const ObsState& obsState, FactAction& out) const = 0;
 
-    virtual void actionToIdx(const Action& action, IdxAction& out) const = 0;
-    virtual void idxToAction(const IdxAction& idxAction, Action& out) const = 0;
+    virtual void idxToAction(uint32_t idxAction, Action& out) const = 0;
+    virtual uint32_t actionToIdx(const Action& action) const = 0;
 };

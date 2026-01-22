@@ -16,8 +16,8 @@ class PerftTool
 {
 private:
     using GT = ITraits<ChessTag>;
-    using ObsState = typename ObsStateT<ChessTag>;
-    using Action = typename ActionT<ChessTag>;
+    using ObsState = typename GT::ObsState;
+    using Action = typename GT::Action;
 
     std::shared_ptr<IEngine<ChessTag>> m_engine;
 

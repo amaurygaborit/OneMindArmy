@@ -68,6 +68,7 @@ public:
 
             double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
             std::cout << "Time: " << ms << " ms" << std::endl;
+			std::cout << "[MCTS] Memory usage: " << this->m_mcts[player]->getMemoryUsage() * 100.0f << " %" << std::endl;
 
             for (size_t p = 0; p < this->m_baseConfig.numAIs; ++p)
             {

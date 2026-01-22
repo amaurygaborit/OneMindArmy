@@ -1,27 +1,16 @@
 #pragma once
 #include <array>
+#include <vector>
 #include <cstdint>
 #include <cstddef>
 #include <limits>
 #include <type_traits>
 #include <concepts>
+#include <algorithm>
 
-template<typename GameTag>
-struct ITraits;
-
-template<typename GameTag>
-using ObsElemsT = typename ITraits<GameTag>::ObsElems;
-template<typename GameTag>
-using MetaT = typename ITraits<GameTag>::Meta;
-template<typename GameTag>
-using ActionT = typename ITraits<GameTag>::Action;
-
-template<typename GameTag>
-struct ObsStateT
-{
-    ObsElemsT<GameTag> elems;
-    MetaT<GameTag>     meta;
-};
+// ============================================================================
+// 1. METAPROGRAMMING UTILS
+// ============================================================================
 
 template<size_t maxValue>
 struct SelectMinimalUInt
@@ -34,207 +23,205 @@ struct SelectMinimalUInt
 template<size_t maxValue>
 using SelectMinimalUIntT = typename SelectMinimalUInt<maxValue>::type;
 
-template<typename T>
-concept ValidGameTraits = requires
-{
-    { T::kNumPlayers } -> std::convertible_to<size_t>;
-    { T::kNumElems } -> std::convertible_to<size_t>;
-    { T::kNumMeta } -> std::convertible_to<size_t>;
-    { T::kActionSpace } -> std::convertible_to<size_t>;
-    { T::kNumPos } -> std::convertible_to<size_t>;
-    { T::kMaxValidActions } -> std::convertible_to<size_t>;
-    typename T::ObsElems;
-    typename T::Meta;
-    typename T::Action;
-}
-&& (T::kNumPlayers > 0 && T::kNumPlayers <= 64)
-&& (T::kNumElems > 0)
-&& (T::kNumMeta > 0)
-&& (T::kActionSpace > 0)
-&& (T::kNumPos > 0)
-&& (T::kMaxValidActions > 0);
-
-template<typename GameTag>
-struct UIntTypes
-{
-    // Garder le compte réel pour les masques
-    static constexpr size_t kRealNumPlayers = ITraits<GameTag>::kNumPlayers;
-
-    // Le +1 est uniquement pour l'Owner ID (0 = None/Public, 1..N = Players)
-    static constexpr size_t kNumOwnerIds = ITraits<GameTag>::kNumPlayers + 1;
-
-    static constexpr size_t kNumElems = ITraits<GameTag>::kNumElems;
-    static constexpr size_t kNumMeta = ITraits<GameTag>::kNumMeta;
-    static constexpr size_t kActionSpace = ITraits<GameTag>::kActionSpace;
-
-    // Correction de kTotalFacts pour utiliser kActionSpace
-    static constexpr size_t kTotalFacts = kNumElems + kNumMeta + kActionSpace + 1;
-
-    static constexpr size_t kNumPos = ITraits<GameTag>::kNumPos + 1;
-    static constexpr size_t kMaxValidActions = ITraits<GameTag>::kMaxValidActions;
-
-    using FIdx = SelectMinimalUIntT<kTotalFacts>;
-    using PIdx = SelectMinimalUIntT<kNumPos>;
-    using OIdx = SelectMinimalUIntT<kNumOwnerIds>; // Utilise kNumOwnerIds
-
-    // VMask basé sur le nombre REEL de joueurs
-    using VMask = std::conditional_t<(kRealNumPlayers <= 8), uint8_t,
-        std::conditional_t<(kRealNumPlayers <= 16), uint16_t,
-        std::conditional_t<(kRealNumPlayers <= 32), uint32_t,
-        uint64_t>>>;
-};
+// ============================================================================
+// 2. ENUMS & CONCEPTS
+// ============================================================================
 
 enum class FactType : uint8_t
 {
     ELEMENT = 0,
     META = 1,
     ACTION = 2,
-    N_FACT_TYPES
+    PAD = 3
 };
+
+template<typename GameTag>
+struct ITraits;
+
+template<typename T>
+concept ValidGameTraits = requires
+{
+    { T::kNumPlayers } -> std::convertible_to<size_t>;
+    { T::kNumElems }   -> std::convertible_to<size_t>;
+    { T::kNumMeta }    -> std::convertible_to<size_t>;
+    { T::kNumPos }     -> std::convertible_to<size_t>;
+    { T::kHasHiddenInfo } -> std::convertible_to<bool>;
+};
+
+// ============================================================================
+// 3. TYPE DEFINITIONS
+// ============================================================================
+
+template<typename GameTag>
+struct UIntTypes
+{
+    using Traits = ITraits<GameTag>;
+
+    static constexpr size_t kNumPlayers = Traits::kNumPlayers;
+    static constexpr size_t kNumOwners = Traits::kNumPlayers + 1;   // + Neutral/Environment
+
+    static constexpr size_t kNumElems = Traits::kNumElems;
+    static constexpr size_t kNumMeta = Traits::kNumMeta;
+    static constexpr size_t kNumAbstractActions = Traits::kNumAbstractActions;
+
+    static constexpr size_t kMetaStartId = kNumElems;
+    static constexpr size_t kAbstractActionStartId = kNumElems + kNumMeta;
+    static constexpr size_t kTotalVocabSize = kNumElems + kNumMeta + kNumAbstractActions + 1;   // + PAD
+
+	static constexpr size_t kTotalPosVocab = Traits::kNumPos + 2;   // + NONE + UNKNOWN
+
+    using FIdx = SelectMinimalUIntT<kTotalVocabSize>;
+    using OIdx = SelectMinimalUIntT<kNumOwners>;
+    using VMask = std::conditional_t<(kNumPlayers <= 8), uint8_t,
+        std::conditional_t<(kNumPlayers <= 16), uint16_t,
+        std::conditional_t<(kNumPlayers <= 32), uint32_t,
+        uint64_t>>>;
+    using PIdx = SelectMinimalUIntT<kTotalPosVocab>;
+};
+
+// ============================================================================
+// 4. THE UNIVERSAL FACT STRUCTURE
+// ============================================================================
 
 template<typename GameTag>
 struct Fact
 {
     using Types = UIntTypes<GameTag>;
+    using Traits = ITraits<GameTag>;
+
     using FIdx = typename Types::FIdx;
+    using OIdx = typename Types::OIdx;
     using VMask = typename Types::VMask;
     using PIdx = typename Types::PIdx;
-    using OIdx = typename Types::OIdx;
 
-    // Utiliser le vrai nombre de joueurs pour la logique
-    static constexpr size_t kNumPlayers = Types::kRealNumPlayers;
+	// --- CONSTANTES ---
+    static constexpr FIdx kMetaStartId = Types::kNumElems;
+    static constexpr FIdx kAbstractActionStartId = Types::kAbstractActionStartId;
+    static constexpr FIdx kPADFactId = static_cast<FIdx>(Types::kTotalVocabSize - 1);
 
-    FIdx     factIdx;
-    VMask    visibleMask;
-    PIdx     posIdx;
-    OIdx     ownerIdx;
-    FactType typeIdx;
+    static constexpr OIdx kNeutralOwnerId = static_cast<OIdx>(Traits::kNumPlayers);
+    static constexpr VMask kVisibleToAll = static_cast<VMask>(~0);
 
-    static constexpr VMask kVisibleToAll = static_cast<VMask>(~static_cast<VMask>(0));
-    static constexpr VMask kVisibleToNone = static_cast<VMask>(0);
+    static constexpr PIdx kNumPos = Traits::kNumPos;
+    static constexpr PIdx kPosNone = static_cast<PIdx>(kNumPos);
+    static constexpr PIdx kPosUnknown = static_cast<PIdx>(kNumPos + 1);
 
-    constexpr bool isElement() const noexcept { return typeIdx == FactType::ELEMENT; }
-    constexpr bool isMeta() const noexcept { return typeIdx == FactType::META; }
-    constexpr bool isAction() const noexcept { return typeIdx == FactType::ACTION; }
+    static constexpr bool kHidden = Traits::kHasHiddenInfo;
+    using PosStorage = std::conditional_t<kHidden, std::array<float, kNumPos>, PIdx>;
 
-    static constexpr Fact MakePad(FactType type) noexcept
+    // --- ATTRIBUTS ---
+    float      dataValue;
+    PosStorage location;
+    VMask      visibleMask;
+    FIdx       factIdx;
+    OIdx       ownerIdx;
+    PIdx       origin;
+    FactType   typeIdx;
+
+    // --- CONSTRUCTEURS ---
+    Fact()
     {
-        Fact f{};
-        f.factIdx = static_cast<FIdx>(0);
-        f.visibleMask = kVisibleToNone;
-        f.posIdx = static_cast<PIdx>(0);
-        f.ownerIdx = static_cast<OIdx>(0);
-        f.typeIdx = type;
-        return f;
+        clear();
     }
 
-    static constexpr Fact MakePublicPad() noexcept
+    void clear()
     {
-        Fact f{};
-        f.factIdx = static_cast<FIdx>(0);
-        f.visibleMask = kVisibleToAll;
-        f.posIdx = static_cast<PIdx>(0);
-        f.ownerIdx = static_cast<OIdx>(0);
-        f.typeIdx = FactType::ELEMENT;
-        return f;
+        if constexpr (kHidden)
+        {
+            std::fill(location.begin(), location.end(), 1.0f / static_cast<float>(kNumPos));
+        }
+        else
+        {
+            location = kPosNone;
+        }
+        typeIdx = FactType::PAD;
+        factIdx = kPADFactId;
+        ownerIdx = kNeutralOwnerId;
+        visibleMask = 0;
+        origin = kPosNone;
+        dataValue = 0.0f;
     }
 
-    static constexpr Fact makePrivateElem(FIdx fIdx, PIdx pIdx, OIdx playerZeroIndexed) noexcept
+    // --- HELPERS POSITIONS ---
+
+    void setDeterministicPos(PIdx posIdx)
     {
-        Fact f{};
-        f.factIdx = static_cast<FIdx>(fIdx + 1);
-        f.visibleMask = static_cast<VMask>(VMask{ 1 } << playerZeroIndexed);
-        f.posIdx = static_cast<PIdx>(pIdx + 1);
-        f.ownerIdx = static_cast<OIdx>(playerZeroIndexed + 1);
-        f.typeIdx = FactType::ELEMENT;
-        return f;
+        if constexpr (kHidden)
+        {
+            std::fill(location.begin(), location.end(), 0.0f);
+            location[posIdx] = 1.0f;
+        }
+        else
+        {
+            location = posIdx;
+        }
+    }
+    void setProbabilisticPos(const std::array<float, kNumPos>& probas)
+    {
+		static_assert(kHidden, "Impossible to use probabilities in Perfect Info!");
+        std::copy(probas.begin(), probas.begin() + kNumPos, location.begin());
     }
 
-    static constexpr Fact makePublicElem(FIdx fIdx, PIdx pIdx) noexcept
+    inline void setElement(FIdx id, OIdx owner, VMask visibility, PIdx locPos, float val)
     {
-        Fact f{};
-        f.factIdx = static_cast<FIdx>(fIdx + 1);
-        f.visibleMask = kVisibleToAll;
-        f.posIdx = static_cast<PIdx>(pIdx + 1);
-        f.ownerIdx = 0;
-        f.typeIdx = FactType::ELEMENT;
-        return f;
+        typeIdx = FactType::ELEMENT;
+        factIdx = id;
+        ownerIdx = owner;
+        visibleMask = visibility;
+        origin = kPosNone;
+        setDeterministicPos(locPos);
+        dataValue = val;
     }
 
-    static constexpr Fact makeMeta(FIdx fIdx) noexcept
+    inline void setMeta(FIdx id, OIdx owner, PIdx locPos, float val)
     {
-        Fact f{};
-        f.factIdx = static_cast<FIdx>(fIdx + 1);
-        f.visibleMask = kVisibleToNone;
-        f.posIdx = 0;
-        f.ownerIdx = 0;
-        f.typeIdx = FactType::META;
-        return f;
-    }
-
-    static constexpr Fact makePrivateAction(FIdx fIdx, PIdx pIdx, OIdx playerZeroIndexed) noexcept
-    {
-        Fact f{};
-        f.factIdx = static_cast<FIdx>(fIdx + 1);
-        f.visibleMask = static_cast<VMask>(VMask{ 1 } << playerZeroIndexed);
-        f.posIdx = static_cast<PIdx>(pIdx + 1);
-        f.ownerIdx = static_cast<OIdx>(playerZeroIndexed + 1);
-        f.typeIdx = FactType::ACTION;
-        return f;
-    }
-
-    static constexpr Fact makePublicAction(FIdx fIdx, PIdx pIdx) noexcept
-    {
-        Fact f{};
-        f.factIdx = static_cast<FIdx>(fIdx + 1);
-        f.visibleMask = kVisibleToAll;
-        f.posIdx = static_cast<PIdx>(pIdx + 1);
-        f.ownerIdx = 0;
-        f.typeIdx = FactType::ACTION;
-        return f;
-    }
-
-    constexpr void setVisibleTo(OIdx playerZeroIndexed) noexcept
-    {
-        visibleMask |= static_cast<VMask>(VMask{ 1 } << playerZeroIndexed);
-    }
-    constexpr void setVisibleToAll() noexcept
-    {
+        typeIdx = FactType::META;
+        factIdx = id;
+        ownerIdx = owner;
         visibleMask = kVisibleToAll;
+        origin = kPosNone;
+        setDeterministicPos(locPos);
+        dataValue = val;
     }
-    constexpr void clearVisibleTo(OIdx playerZeroIndexed) noexcept
+
+    inline void setAction(FIdx id, OIdx owner, VMask visibility, PIdx originPos, PIdx locPos, float val)
     {
-        visibleMask &= ~static_cast<VMask>(VMask{ 1 } << playerZeroIndexed);
-    }
-    constexpr void clearVisibleToAll() noexcept
-    {
-        visibleMask = kVisibleToNone;
+        typeIdx = FactType::ACTION;
+        factIdx = id;
+        ownerIdx = owner;
+        visibleMask = visibility;
+        origin = originPos;
+        setDeterministicPos(locPos);
+        dataValue = val;
     }
 };
 
+// ============================================================================
+// 5. STATE STRUCTURES
+// ============================================================================
+
 template<typename GameTag>
-struct IdxStateT
+struct FactStateT
 {
     std::array<Fact<GameTag>, ITraits<GameTag>::kNumElems> elemFacts;
     std::array<Fact<GameTag>, ITraits<GameTag>::kNumMeta>  metaFacts;
 
-    IdxStateT() noexcept
+    FactStateT()
     {
-        elemFacts.fill(Fact<GameTag>::MakePad(FactType::ELEMENT));
-        metaFacts.fill(Fact<GameTag>::MakePad(FactType::META));
+        for (auto& f : elemFacts) f.clear();
+        for (auto& f : metaFacts) f.clear();
     }
 };
 
 template<typename GameTag>
-using IdxActionT = Fact<GameTag>;
-
-template<typename GameTag>
-struct IdxStateActionT
+struct FactStateActionT
 {
-    IdxStateT<GameTag>  idxState;
-    IdxActionT<GameTag> idxAction;
+	FactStateT<GameTag> stateFacts;
+	Fact<GameTag> actionFact;
 
-    IdxStateActionT() noexcept
-        : idxState(), idxAction(Fact<GameTag>::MakePad(FactType::ACTION))
-    {}
+    FactStateActionT()
+    {
+		stateFacts = FactStateT<GameTag>{};
+		actionFact.clear();
+    }
 };

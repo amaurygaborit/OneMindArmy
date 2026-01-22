@@ -55,6 +55,11 @@ struct BoardStatusFor
 template<uint8_t StatusFlag>
 class MoveGenerator
 {
+public:
+    using GT = ITraits<ChessTag>;
+    using ObsState = typename GT::ObsState;
+    using Action = typename GT::Action;
+
 private:
     static constexpr const auto& bs = BoardStatusFor<StatusFlag>{};
 
@@ -69,7 +74,7 @@ private:
         map enPassantBB;
 
         ALWAYS_INLINE
-            void setBoard(const ObsStateT<ChessTag>& state) noexcept
+            void setBoard(const ObsState& state) noexcept
         {
             if constexpr (bs.isWhite)
             {
@@ -260,11 +265,11 @@ private:
 
     // Add legal moves
     static ALWAYS_INLINE
-        void addLegalMoves(AlignedVec<ActionT<ChessTag>>& out, int pieceSquare, map pieceMask, map promo) noexcept
+        void addLegalMoves(AlignedVec<Action>& out, int pieceSquare, map pieceMask, map promo) noexcept
     {
         while (pieceMask)
         {
-            ActionT<ChessTag> action;
+            Action action;
             action.setFrom(pieceSquare);
             action.setTo(popLSB(pieceMask));
 
@@ -286,7 +291,7 @@ private:
 
 public:
     MoveGenerator() = default;
-    static void countCheck(const ObsStateT<ChessTag>& state, int& out) noexcept
+    static void countCheck(const ObsState& state, int& out) noexcept
     {
         Board b;
         b.setBoard(state);
@@ -301,7 +306,7 @@ public:
         computeCheckAndPins(b, pinnerOf, checkMask, out, kingSq);
     }
 
-    static void generate(const ObsStateT<ChessTag>& state, AlignedVec<ActionT<ChessTag>>& out) noexcept
+    static void generate(const ObsState& state, AlignedVec<Action>& out) noexcept
     {
         Board b;
         b.setBoard(state);
@@ -616,7 +621,7 @@ public:
         addLegalMoves(out, kingSq, kingAtk, 0);
     }
 
-    static void apply(const ActionT<ChessTag>& move, ObsStateT<ChessTag>& out) noexcept
+    static void apply(const Action& move, ObsState& out) noexcept
     {
         int start = move.from();
         int dest = move.to();

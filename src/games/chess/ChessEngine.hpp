@@ -26,9 +26,9 @@ public:
     void applyAction(const Action& action, ObsState& out) const override;
     bool isTerminal(const ObsState& obsState, AlignedVec<float>& out) const override;
 
-    void obsToIdx(const ObsState& obsState, IdxState& out) const override;
-    void idxToObs(const IdxState& idxInput, ObsState& out) const override;
+    void stateToFacts(const ObsState& obsState, FactState& out) const override;
+    void actionToFact(const Action& action, const ObsState& obsState, FactAction& out) const override;
 
-    void actionToIdx(const Action& action, IdxAction& out) const override;
-    void idxToAction(const IdxAction& idxAction, Action& out) const override;
+    void idxToAction(uint32_t idxAction, Action& out) const override;
+    uint32_t actionToIdx(const Action& action) const override;
 };

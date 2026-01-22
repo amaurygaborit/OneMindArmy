@@ -370,10 +370,9 @@ bool ChessEngine::isTerminal(const ObsState& obsState, AlignedVec<float>& out) c
 	return false;
 }
 
-void ChessEngine::obsToIdx(const ObsState& obsState, IdxState& out) const
+void ChessEngine::stateToFacts(const ObsState& obsState, FactState& out) const
 {
-	size_t factIdx = 0;
-	size_t maxFacts = out.elemFacts.size();
+	Fact<ChessTag>::FIdx elemIdx = 0;
 
 	// --- 1. Pièces Blanches (IDs 0 à 5) ---
 	for (int i = 0; i < 6; ++i)
@@ -383,10 +382,7 @@ void ChessEngine::obsToIdx(const ObsState& obsState, IdxState& out) const
 		{
 			int sq = std::countr_zero(bb);
 			bb &= (bb - 1);
-
-			if (factIdx < maxFacts) {
-				out.elemFacts[factIdx++] = Fact<ChessTag>::makePublicElem(i, sq);
-			}
+			out.elemFacts[elemIdx++].setElement(i, 0, Fact<ChessTag>::kVisibleToAll, sq, 1.0f);
 		}
 	}
 
@@ -398,25 +394,63 @@ void ChessEngine::obsToIdx(const ObsState& obsState, IdxState& out) const
 		{
 			int sq = std::countr_zero(bb);
 			bb &= (bb - 1);
-
-			if (factIdx < maxFacts) {
-				out.elemFacts[factIdx++] = Fact<ChessTag>::makePublicElem(i + 6, sq);
-			}
+			out.elemFacts[elemIdx++].setElement(i + 6, 1, Fact<ChessTag>::kVisibleToAll, sq, 1.0f);
 		}
 	}
 
-	// SAFETY: Remplir le reste avec du Padding explicitement
-	// C'est vital car 'out' peut être réutilisé et contenir de vieilles données
-	while (factIdx < maxFacts) {
-		out.elemFacts[factIdx++] = Fact<ChessTag>::MakePad(FactType::ELEMENT);
-	}
+	// --- 3. Métadonnées (IDs 12 à 20) ---
+	Fact<ChessTag>::FIdx metaIdx = 0;
+	Fact<ChessTag>::FIdx metaStartId = Fact<ChessTag>::kMetaStartId;
+
+	out.metaFacts[metaIdx++].setMeta(metaStartId, static_cast<Fact<ChessTag>::OIdx>(obsState.meta.trait), Fact<ChessTag>::kPosNone, 1.0f);
+	out.metaFacts[metaIdx++].setMeta(metaStartId + 1, 0, Fact<ChessTag>::kPosNone, obsState.meta.hasWKCastlingRight() ? 0.0f : 1.0f);
+	out.metaFacts[metaIdx++].setMeta(metaStartId + 2, 0, Fact<ChessTag>::kPosNone, obsState.meta.hasWQCastlingRight() ? 0.0f : 1.0f);
+	out.metaFacts[metaIdx++].setMeta(metaStartId + 3, 1, Fact<ChessTag>::kPosNone, obsState.meta.hasBKCastlingRight() ? 0.0f : 1.0f);
+	out.metaFacts[metaIdx++].setMeta(metaStartId + 4, 1, Fact<ChessTag>::kPosNone, obsState.meta.hasBQCastlingRight() ? 0.0f : 1.0f);
+
+	if (obsState.meta.enPassant == 0)
+		out.metaFacts[metaIdx++].setMeta(metaStartId + 5, Fact<ChessTag>::kNeutralOwnerId, Fact<ChessTag>::kPosNone, 0.0f);
+	else
+		out.metaFacts[metaIdx++].setMeta(metaStartId + 5, Fact<ChessTag>::kNeutralOwnerId, obsState.meta.enPassant, 1.0f);
+
+	out.metaFacts[metaIdx++].setMeta(metaStartId + 6, Fact<ChessTag>::kNeutralOwnerId, Fact<ChessTag>::kPosNone, static_cast<float>(obsState.meta.halfmoveClock) / 50.0f);
+	out.metaFacts[metaIdx++].setMeta(metaStartId + 7, Fact<ChessTag>::kNeutralOwnerId, Fact<ChessTag>::kPosNone, static_cast<float>(obsState.meta.fullmoveNumber) / 200.0f);
+	out.metaFacts[metaIdx++].setMeta(metaStartId + 8, Fact<ChessTag>::kNeutralOwnerId, Fact<ChessTag>::kPosNone, static_cast<float>(obsState.meta.repetitions) / 3.0f);
 }
-void ChessEngine::idxToObs(const IdxState& idxInput, ObsState& out) const
+void ChessEngine::actionToFact(const Action& action, const ObsState& state, FactAction& out) const
+{
+	uint8_t fromSq = action.from();
+	uint8_t toSq = action.to();
+	uint8_t player = state.meta.trait;
+
+	Fact<ChessTag>::FIdx pieceTypeId = 0;
+	const uint64_t* bbs = (player == 0) ? state.elems.whiteBB : state.elems.blackBB;
+
+	int idOffset = (player == 0) ? 0 : 6;
+	for (int i = 0; i < 6; ++i)
+	{
+		if ((bbs[i] >> fromSq) & 1ULL)
+		{
+			pieceTypeId = static_cast<Fact<ChessTag>::FIdx>(idOffset + i);
+			break;
+		}
+	}
+
+	out.setAction(
+		pieceTypeId,
+		static_cast<Fact<ChessTag>::OIdx>(player),
+		Fact<ChessTag>::kVisibleToAll,
+		static_cast<Fact<ChessTag>::PIdx>(fromSq),
+		static_cast<Fact<ChessTag>::PIdx>(toSq),
+		static_cast<float>(action.promo())
+	);
+}
+
+void ChessEngine::idxToAction(uint32_t idxAction, Action& out) const
 {
 
 }
-
-void ChessEngine::actionToIdx(const Action& action, IdxAction& out) const
+uint32_t ChessEngine::actionToIdx(const Action& action) const
 {
 	const uint8_t fromIdx = action.from();
 	const uint8_t toIdx = action.to();
@@ -480,9 +514,5 @@ void ChessEngine::actionToIdx(const Action& action, IdxAction& out) const
 		else throw std::runtime_error("ChessEngine::actionToIdx(): Invalid promotion move");
 	}
 
-	out = Fact<ChessTag>::makePublicAction(encodedFrom + encodedTo, toIdx);
-}
-void ChessEngine::idxToAction(const IdxAction& idxAction, Action& out) const
-{
-
+	return static_cast<uint32_t>(encodedFrom + encodedTo);
 }
