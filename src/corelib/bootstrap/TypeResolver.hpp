@@ -2,41 +2,64 @@
 #include <string>
 #include <unordered_map>
 #include <stdexcept>
+#include <memory>
 #include <yaml-cpp/yaml.h>
 
-struct TypeResolverBase
+namespace Core
 {
-    virtual ~TypeResolverBase() = default;
-    virtual void run(const YAML::Node& config) const = 0;
-};
-
-class TypeResolverRegistry
-{
-private:
-    std::unordered_map<std::string, const TypeResolverBase*> m_resolvers;
-
-public:
-    static TypeResolverRegistry& instance()
+    // ========================================================================
+    // 1. L'INTERFACE (Contrat)
+    // ========================================================================
+    // Tout jeu doit savoir s'exécuter à partir d'une config YAML.
+    struct IGameRunner
     {
-        static TypeResolverRegistry inst;
-        return inst;
-    }
+        virtual ~IGameRunner() = default;
+        virtual void run(const YAML::Node& config) const = 0;
+    };
 
-    void registerResolver(const std::string& gameName, const TypeResolverBase* resolver)
+    // ========================================================================
+    // 2. LE REGISTRE (Conteneur Singleton)
+    // ========================================================================
+    // Il stocke les pointeurs vers les IGameRunner.
+    class GameRegistry
     {
-        m_resolvers[gameName] = resolver;
-    }
+    private:
+        std::unordered_map<std::string, IGameRunner*> m_runners;
 
-    const TypeResolverBase& get(const std::string& gameName) const
-    {
-        auto it = m_resolvers.find(gameName);
-        if (it == m_resolvers.end())
-            throw std::runtime_error("No resolver registered for game: " + gameName);
-        return *it->second;
-    }
+        GameRegistry() = default; // Privé pour Singleton
 
-    void run(const std::string& gameName, const YAML::Node& config) const
-    {
-        get(gameName).run(config);
-    }
-};
+    public:
+        // Singleton Thread-Safe (C++11 magic static)
+        static GameRegistry& instance()
+        {
+            static GameRegistry inst;
+            return inst;
+        }
+
+        // Enregistre un jeu (appelé automatiquement au démarrage)
+        void registerGame(const std::string& name, IGameRunner* runner)
+        {
+            if (m_runners.find(name) != m_runners.end()) {
+                std::cerr << "Warning: Game '" << name << "' is already registered.\n";
+                return;
+            }
+            m_runners[name] = runner;
+        }
+
+        // Récupère un jeu
+        IGameRunner* get(const std::string& name) const
+        {
+            auto it = m_runners.find(name);
+            if (it == m_runners.end()) {
+                throw std::runtime_error("Game registry error: No game found named '" + name + "'");
+            }
+            return it->second;
+        }
+
+        // Helper pour lancer directement
+        void run(const std::string& name, const YAML::Node& config) const
+        {
+            get(name)->run(config);
+        }
+    };
+}

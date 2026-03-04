@@ -1,28 +1,78 @@
 #pragma once
-#include "IEngine.hpp"
+#include "../bootstrap/GameConfig.hpp"
+#include "../model/GameTypes.hpp"
 
-template<typename GameTag>
-class IRequester
+// ============================================================================
+// IRequester.hpp — Action & State Request Interface
+//
+// A Requester is the bridge between the game loop and an external decision
+// source: a human player (via stdin / GUI), a remote UCI/protocol peer, or any
+// other non-AI agent.
+//
+// For AI agents the InferenceHandler drives the search tree directly and does
+// not go through IRequester. IRequester is only needed when at least one player
+// is human or externally controlled (numHumans > 0 in config).
+//
+// Implementors must override:
+//   specificSetup()      — load requester-specific YAML fields
+//   requestAction()      — block until the controlled player submits a move
+//
+// Optional overrides:
+//   notifyAction()       — inform the requester of a move made by another player
+//                          (useful to keep a remote GUI in sync)
+//   notifyResult()       — inform the requester of the final game outcome
+// ============================================================================
+
+namespace Core
 {
-protected:
-	using GT = ITraits<GameTag>;
-	using ObsState = typename GT::ObsState;
-	using Action = typename GT::Action;
+    template<ValidGameTraits GT>
+    class IRequester
+    {
+    public:
+        USING_GAME_TYPES(GT);
 
-	std::shared_ptr<IEngine<GameTag>> m_engine;
+    protected:
+        virtual void specificSetup(const YAML::Node& config) = 0;
 
-protected:
-	virtual void specificSetup(const YAML::Node& config) = 0;
+    public:
+        virtual ~IRequester() = default;
 
-public:
-	virtual ~IRequester() = default;
-	void setup(const YAML::Node& config,
-		std::shared_ptr<IEngine<GameTag>> engine)
-	{
-		m_engine = std::move(engine);
-		specificSetup(config);
-	};
-	
-	virtual void requestInitialState(const size_t player, ObsState& out) const = 0;
-	virtual void requestAction(const ObsState& obsState, Action& out) const = 0;
-};
+        // -------------------------------------------------------------------
+        // SETUP
+        // -------------------------------------------------------------------
+
+        void setup(const YAML::Node& config)
+        {
+            specificSetup(config);
+        }
+
+        // -------------------------------------------------------------------
+        // REQUIRED INTERFACE
+        // -------------------------------------------------------------------
+
+        virtual void requestInitialState(const uint32_t player, State& outState) const = 0;
+
+        /// Blocks until the externally-controlled player provides a legal move.
+        ///
+        /// @param state    Current game state (read-only; used to display the
+        ///                 board or validate keyboard input).
+        /// @param player   Index of the player who must move.
+        /// @param out      Filled with the chosen Action. Must be a legal move;
+        ///                 the requester is responsible for validation loops.
+        virtual Action requestAction(const State& state) const = 0;
+
+        // -------------------------------------------------------------------
+        // OPTIONAL NOTIFICATION HOOKS
+        // These default to no-ops. Override in requesters that maintain a
+        // remote view of the game (e.g. a UCI GUI or a network peer).
+        // -------------------------------------------------------------------
+
+        /// Called by the game loop after any player (including AI) makes a move.
+        /// Allows the requester to forward the move to a remote UI or log file.
+        virtual void notifyAction(const Action& action, uint32_t player) const {}
+
+        /// Called by the game loop when the game ends.
+        /// Allows the requester to display the result or send it to a remote peer.
+        virtual void notifyResult(const std::span<const float> result) const {}
+    };
+}

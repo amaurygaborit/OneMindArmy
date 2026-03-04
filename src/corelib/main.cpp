@@ -33,7 +33,7 @@ int main(int argc, char* argv[])
             throw std::runtime_error("Configuration missing 'name' field.");
         std::string gameName = config["name"].as<std::string>();
 
-        TypeResolverRegistry::instance().run(gameName, config);
+        Core::GameRegistry::instance().run(gameName, config);
     }
     catch (const std::exception& e)
     {

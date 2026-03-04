@@ -1,29 +1,32 @@
 ﻿#pragma once
 #include <unordered_map>
 
-#include "../../AlignedVec.hpp"
+#include "../../util/AlignedVec.hpp"
 
-struct Experience
+namespace Core
 {
-    
-};
+    struct Experience
+    {
 
-class PriorityReplayBuffer
-{
-private:
-    //std::unordered_map<size_t, Experience> buffer;
-    //std::vector<Experience> batch;
+    };
 
-    uint32_t m_currentSize;
-    const uint32_t m_kBufferSize;
-    const uint32_t m_kBatchSize;
+    class PriorityReplayBuffer
+    {
+    private:
+        //std::unordered_map<size_t, Experience> buffer;
+        //std::vector<Experience> batch;
 
-public:
-    PriorityReplayBuffer(uint32_t bufferSize, uint32_t batchSize);
-    ~PriorityReplayBuffer() = default;
+        uint32_t m_currentSize;
+        const uint32_t m_kBufferSize;
+        const uint32_t m_kBatchSize;
 
-    //size_t getSize() const;
+    public:
+        PriorityReplayBuffer(uint32_t bufferSize, uint32_t batchSize);
+        ~PriorityReplayBuffer() = default;
 
-    //void add(Experience& experience);
-    //std::vector<Experience>& sampleBatch();
-};
+        //size_t getSize() const;
+
+        //void add(Experience& experience);
+        //std::vector<Experience>& sampleBatch();
+    };
+}

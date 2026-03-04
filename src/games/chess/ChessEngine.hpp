@@ -3,32 +3,38 @@
 #include "MoveGenerator.hpp"
 #include "FenParser.hpp"
 
-class ChessEngine : public IEngine<ChessTag>
+namespace Chess
 {
-private:
-    bool isFiftyMoveRule(const ObsState& obsState) const;
-    bool isInsufficientMaterial(const ObsState& obsState) const;
+    class ChessEngine : public Core::IEngine<ChessTypes>
+    {
+    public:
+        USING_GAME_TYPES(ChessTypes);
 
-    bool ourKingInCheck(const ObsState& obsState) const;
+    private:
+        void stateToBB(const State& state, StateBB& out) const;
 
-protected:
-	void specificSetup(const YAML::Node& config) override;
+        bool isFiftyMoveRule(const State& state) const;
+        bool isInsufficientMaterial(const State& state) const;
 
-public:
-	ChessEngine();
+        bool ourKingInCheck(const State& state) const;
 
-    void getInitialState(const size_t player, ObsState& out) const override;
+    protected:
+        void specificSetup(const YAML::Node& config) override;
 
-    size_t getCurrentPlayer(const ObsState& obsState) const override;
+    public:
+        ChessEngine();
 
-    void getValidActions(const ObsState& obsState, AlignedVec<Action>& out) const override;
-    bool isValidAction(const ObsState& obsState, const Action& action) const override;
-    void applyAction(const Action& action, ObsState& out) const override;
-    bool isTerminal(const ObsState& obsState, AlignedVec<float>& out) const override;
+        void getInitialState(const uint32_t player, State& outState) const override;
+        uint32_t getCurrentPlayer(const State& state) const override;
+        ActionList getValidActions(const State& state, std::span<const uint64_t> hashHistory) const override;
+        bool isValidAction(const State& state, std::span<const uint64_t> hashHistory, const Action& action) const override;
+        std::optional<GameResult> getGameResult(const State& state, std::span<const uint64_t> hashHistory) const override;
 
-    void stateToFacts(const ObsState& obsState, FactState& out) const override;
-    void actionToFact(const Action& action, const ObsState& obsState, FactAction& out) const override;
+        void changeStatePov(uint32_t viewer, State& outState) const override;
+        void changeActionPov(uint32_t viewer, Action& outAction) const override;
 
-    void idxToAction(uint32_t idxAction, Action& out) const override;
-    uint32_t actionToIdx(const Action& action) const override;
-};
+        void applyAction(const Action& action, State& outState) const override;
+
+        uint32_t actionToIdx(const Action& action) const override;
+    };
+}

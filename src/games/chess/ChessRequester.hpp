@@ -1,16 +1,22 @@
 #pragma once
-#include "ChessTraits.hpp"
 #include "../../corelib/interfaces/IRequester.hpp"
+#include "ChessTypes.hpp"
 
-class ChessRequester : public IRequester<ChessTag>
+namespace Chess
 {
-private:
-	void convertToAction(std::string& moveStr, Action& out) const;
+	class ChessRequester : public Core::IRequester<ChessTypes>
+	{
+	public:
+		USING_GAME_TYPES(ChessTypes);
 
-protected:
-	void specificSetup(const YAML::Node& config) override;
+	private:
+		Action convertToAction(const std::string& moveStr, const State state) const;
 
-public:
-	void requestInitialState(const size_t player, ObsState& out) const;
-	void requestAction(const ObsState& obsState, Action& out) const override;
-};
+	protected:
+		void specificSetup(const YAML::Node& config) override;
+
+	public:
+		void requestInitialState(const uint32_t player, State& outState) const override;
+        Action requestAction(const State& state) const override;
+	};
+}

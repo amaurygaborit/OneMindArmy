@@ -1,291 +1,242 @@
 ﻿#pragma once
-#include "ChessTraits.hpp"
 #include <string>
 #include <string_view>
-#include <optional>
+#include <sstream>
 #include <cctype>
 #include <stdexcept>
+#include <algorithm>
 
-/// @brief Exception levée lors d'un parsing FEN invalide
-class InvalidFenException : public std::runtime_error {
-public:
-    explicit InvalidFenException(const std::string& message)
-        : std::runtime_error("Invalid FEN: " + message) {}
-};
+#include "ChessTypes.hpp"
 
-/// @brief Parseur FEN (Forsyth-Edwards Notation) pour les échecs
-class FenParser {
-public:
-    using ObsState = typename ITraits<ChessTag>::ObsState;
+namespace Chess
+{
+    // Exception spécifique pour le parsing
+    class InvalidFenException : public std::runtime_error
+    {
+    public:
+        explicit InvalidFenException(const std::string& message)
+            : std::runtime_error("Invalid FEN: " + message) {}
+    };
 
-    /// @brief Parse une notation FEN et remplit l'état observable
-    /// @param fen La chaîne FEN à parser
-    /// @param out L'état de sortie à remplir
-    /// @return true si le parsing a réussi, false sinon
-    [[nodiscard]] static bool tryGetFenState(std::string_view fen, ObsState& out) noexcept {
-        try {
-            getFenState(fen, out);
-            return true;
-        }
-        catch (...) {
-            return false;
-        }
-    }
+    class FenParser
+    {
+    private:
+        USING_GAME_TYPES(ChessTypes);
 
-    /// @brief Parse une notation FEN et remplit l'état observable (lance une exception si invalide)
-    /// @param fen La chaîne FEN à parser
-    /// @param out L'état de sortie à remplir
-    /// @throws InvalidFenException si le FEN est invalide
-    static void getFenState(std::string_view fen, ObsState& out) {
-        // Reset the state
-        out = ObsState{};
+        static Vec<std::string_view> splitFen(std::string_view fen)
+        {
+            Vec<std::string_view> result;
+            size_t start = 0;
+            size_t end = fen.find(' ');
 
-        if (fen.empty()) {
-            throw InvalidFenException("FEN string is empty");
+            while (end != std::string_view::npos)
+            {
+                if (end > start)
+                    result.push_back(fen.substr(start, end - start));
+                start = end + 1;
+                end = fen.find(' ', start);
+            }
+            if (start < fen.size())
+                result.push_back(fen.substr(start));
+            return result;
         }
 
-        // Split FEN into fields
-        auto fields = splitFen(fen);
-        if (fields.size() < 2) {
-            throw InvalidFenException("FEN must have at least 2 fields (position and turn)");
-        }
-        if (fields.size() > 6) {
-            throw InvalidFenException("FEN has too many fields (max 6)");
-        }
+        // --- 1. BOARD (Pièces) ---
+        static void parseBoard(std::string_view boardFen, State& outState)
+        {
+            int rank = 7;
+            int file = 0;
 
-        // Parse each field
-        parsePiecePosition(fields[0], out);
-        parseActiveColor(fields[1], out);
+            // Compteurs pour allocation linéaire dans le tableau fixe elems[32]
+            // Blancs : indices 0 à 15
+            // Noirs  : indices 16 à 31
+            size_t whiteIdx = 0;
+            size_t blackIdx = 16;
 
-        if (fields.size() > 2) parseCastlingRights(fields[2], out);
-        if (fields.size() > 3) parseEnPassantSquare(fields[3], out);
-        if (fields.size() > 4) parseHalfmoveClock(fields[4], out);
-        if (fields.size() > 5) parseFullmoveNumber(fields[5], out);
-    }
-
-private:
-    /// @brief Divise la chaîne FEN en champs
-    [[nodiscard]] static std::vector<std::string_view> splitFen(std::string_view fen) {
-        std::vector<std::string_view> fields;
-        std::size_t start = 0;
-
-        for (std::size_t i = 0; i < fen.size(); ++i) {
-            if (fen[i] == ' ') {
-                if (i > start) {
-                    fields.push_back(fen.substr(start, i - start));
+            for (char c : boardFen)
+            {
+                if (c == '/')
+                {
+                    rank--;
+                    file = 0;
                 }
-                start = i + 1;
-            }
-        }
-
-        // Add last field
-        if (start < fen.size()) {
-            fields.push_back(fen.substr(start));
-        }
-
-        return fields;
-    }
-
-    /// @brief Parse la position des pièces (champ 1)
-    static void parsePiecePosition(std::string_view position, ObsState& out) {
-        int file = 0;  // Column (0-7)
-        int rank = 7;  // Row (7-0, from top to bottom)
-        int rankCount = 0;
-
-        for (char c : position) {
-            if (c == '/') {
-                if (file != 8) {
-                    throw InvalidFenException("Rank does not have 8 squares");
+                else if (std::isdigit(c))
+                {
+                    file += (c - '0');
                 }
-                rank--;
-                file = 0;
-                rankCount++;
-                if (rank < -1) {
-                    throw InvalidFenException("Too many ranks (max 8)");
+                else
+                {
+                    // C'est une pièce
+                    if (rank < 0 || file >= 8)
+                        throw InvalidFenException("Malformed board ranks/files");
+
+                    size_t pos = static_cast<size_t>(rank * 8 + file);
+                    Piece pieceType;
+                    Player owner;
+                    size_t* targetIdx = nullptr;
+
+                    switch (c)
+                    {
+                    case 'P': pieceType = PAWN;   owner = WHITE; targetIdx = &whiteIdx; break;
+                    case 'N': pieceType = KNIGHT; owner = WHITE; targetIdx = &whiteIdx; break;
+                    case 'B': pieceType = BISHOP; owner = WHITE; targetIdx = &whiteIdx; break;
+                    case 'R': pieceType = ROOK;   owner = WHITE; targetIdx = &whiteIdx; break;
+                    case 'Q': pieceType = QUEEN;  owner = WHITE; targetIdx = &whiteIdx; break;
+                    case 'K': pieceType = KING;   owner = WHITE; targetIdx = &whiteIdx; break;
+
+                    case 'p': pieceType = PAWN;   owner = BLACK; targetIdx = &blackIdx; break;
+                    case 'n': pieceType = KNIGHT; owner = BLACK; targetIdx = &blackIdx; break;
+                    case 'b': pieceType = BISHOP; owner = BLACK; targetIdx = &blackIdx; break;
+                    case 'r': pieceType = ROOK;   owner = BLACK; targetIdx = &blackIdx; break;
+                    case 'q': pieceType = QUEEN;  owner = BLACK; targetIdx = &blackIdx; break;
+                    case 'k': pieceType = KING;   owner = BLACK; targetIdx = &blackIdx; break;
+                    default: throw InvalidFenException(std::string("Unknown piece char: ") + c);
+                    }
+
+                    // Vérification débordement (Max 16 pièces par couleur)
+                    // Si le FEN contient > 16 pièces d'une couleur (très rare, promotions massives), 
+                    // on ne peut pas le représenter dans notre structure fixe.
+                    if ((owner == WHITE && *targetIdx >= 16) ||
+                        (owner == BLACK && *targetIdx >= 32))
+                    {
+                        throw InvalidFenException("Too many pieces for fixed state size");
+                    }
+
+                    // Configuration du Fact
+                    outState.modifyElem(*targetIdx)->configureElem(pieceType, owner);
+                    outState.modifyElem(*targetIdx)->setPos(pos);
+
+                    (*targetIdx)++;
+                    file++;
                 }
-                continue;
             }
+        }
 
-            if (std::isdigit(c)) {
-                int emptySquares = c - '0';
-                if (emptySquares < 1 || emptySquares > 8) {
-                    throw InvalidFenException("Invalid empty square count");
+        // --- 2. ACTIVE COLOR ---
+        static void parseActiveColor(std::string_view turn, State& outState)
+        {
+            uint8_t owner = 0;
+            if (turn == "w") owner = WHITE;
+            else if (turn == "b") owner = BLACK;
+            else throw InvalidFenException("Invalid active color");
+
+            outState.modifyMeta(SLOT_TURN)->configureMeta(TURN, owner);
+        }
+
+        // --- 3. CASTLING RIGHTS ---
+        static void parseCastlingRights(std::string_view castling, State& outState)
+        {
+            outState.modifyMeta(SLOT_CASTLING_WK)->configureMeta(CASTLING_KINGSIDE, WHITE, 0.0f);
+            outState.modifyMeta(SLOT_CASTLING_WQ)->configureMeta(CASTLING_QUEENSIDE, WHITE, 0.0f);
+            outState.modifyMeta(SLOT_CASTLING_BK)->configureMeta(CASTLING_KINGSIDE, BLACK, 0.0f);
+            outState.modifyMeta(SLOT_CASTLING_BQ)->configureMeta(CASTLING_QUEENSIDE, BLACK, 0.0f);
+
+            if (castling == "-") return;
+
+            for (char c : castling)
+            {
+                switch (c)
+                {
+                case 'K': outState.modifyMeta(SLOT_CASTLING_WK)->setValue(1.0f); break;
+                case 'Q': outState.modifyMeta(SLOT_CASTLING_WQ)->setValue(1.0f); break;
+                case 'k': outState.modifyMeta(SLOT_CASTLING_BK)->setValue(1.0f); break;
+                case 'q': outState.modifyMeta(SLOT_CASTLING_BQ)->setValue(1.0f); break;
+                default: break;
                 }
-                file += emptySquares;
-            }
-            else {
-                if (file >= 8) {
-                    throw InvalidFenException("Too many files in rank (max 8)");
-                }
-
-                std::uint64_t bitPosition = 1ULL << (8 * rank + file);
-
-                switch (c) {
-                case 'P': out.elems.whiteBB[0] |= bitPosition; break;
-                case 'N': out.elems.whiteBB[1] |= bitPosition; break;
-                case 'B': out.elems.whiteBB[2] |= bitPosition; break;
-                case 'R': out.elems.whiteBB[3] |= bitPosition; break;
-                case 'Q': out.elems.whiteBB[4] |= bitPosition; break;
-                case 'K': out.elems.whiteBB[5] |= bitPosition; break;
-                case 'p': out.elems.blackBB[0] |= bitPosition; break;
-                case 'n': out.elems.blackBB[1] |= bitPosition; break;
-                case 'b': out.elems.blackBB[2] |= bitPosition; break;
-                case 'r': out.elems.blackBB[3] |= bitPosition; break;
-                case 'q': out.elems.blackBB[4] |= bitPosition; break;
-                case 'k': out.elems.blackBB[5] |= bitPosition; break;
-                default:
-                    throw InvalidFenException(std::string("Invalid piece character: ") + c);
-                }
-                file++;
             }
         }
 
-        if (rankCount != 7) {
-            throw InvalidFenException("Position must have exactly 8 ranks");
-        }
-        if (file != 8) {
-            throw InvalidFenException("Last rank does not have 8 squares");
-        }
-    }
+        // --- 4. EN PASSANT ---
+        static void parseEnPassant(std::string_view ep, State& outState, std::string_view turn)
+        {
+            int squareIdx = static_cast<int>(Defs::kNoPos);
 
-    /// @brief Parse le joueur actif (champ 2)
-    static void parseActiveColor(std::string_view color, ObsState& out) {
-        if (color.size() != 1) {
-            throw InvalidFenException("Active color must be 'w' or 'b'");
-        }
+            if (ep != "-")
+            {
+                if (ep.size() < 2)
+                    throw InvalidFenException("Invalid EP square");
+                int col = ep[0] - 'a';
+                int row = ep[1] - '1';
+                if (col < 0 || col > 7 || row < 0 || row > 7)
+                    throw InvalidFenException("Invalid EP coords");
 
-        if (color[0] == 'w') {
-            out.meta.trait = 0;
-        }
-        else if (color[0] == 'b') {
-            out.meta.trait = 1;
-        }
-        else {
-            throw InvalidFenException(std::string("Invalid active color: ") + std::string(color));
-        }
-    }
+                squareIdx = row * 8 + col;
+            }
 
-    /// @brief Parse les droits de roque (champ 3)
-    static void parseCastlingRights(std::string_view castling, ObsState& out) {
-        if (castling.empty()) {
-            throw InvalidFenException("Castling rights field is empty");
-        }
+            if (squareIdx == static_cast<int>(Defs::kNoPos))
+            {
+                outState.modifyMeta(SLOT_EN_PASSANT)->configureMeta(EN_PASSANT, Defs::kNoOwner, 0.0f);
+                return;
+            }
+            uint8_t owner = Defs::kNoOwner;
+            if (turn == "w") owner = WHITE;
+            else if (turn == "b") owner = BLACK;
+            else throw InvalidFenException("Invalid active color");
 
-        if (castling == "-") {
-            out.meta.castlingRights = 0;
-            return;
+            outState.modifyMeta(SLOT_EN_PASSANT)->configureMeta(EN_PASSANT, owner);
+			outState.modifyMeta(SLOT_EN_PASSANT)->setPos(squareIdx);
         }
 
-        std::uint8_t rights = 0;
-        bool hasK = false, hasQ = false, hask = false, hasq = false;
+        // --- 5. HALFMOVE CLOCK ---
+        static void parseHalfmoveClock(std::string_view half, State& outState)
+        {
+            int val = 0;
+            try { val = std::stoi(std::string(half)); }
+            catch (...) {}
+            outState.modifyMeta(SLOT_HALF_MOVE)->configureMeta(HALF_MOVE, Defs::kNoOwner, static_cast<float>(val));
+        }
 
-        for (char c : castling) {
-            switch (c) {
-            case 'K':
-                if (hasK) throw InvalidFenException("Duplicate 'K' in castling rights");
-                rights |= 1;
-                hasK = true;
-                break;
-            case 'Q':
-                if (hasQ) throw InvalidFenException("Duplicate 'Q' in castling rights");
-                rights |= 2;
-                hasQ = true;
-                break;
-            case 'k':
-                if (hask) throw InvalidFenException("Duplicate 'k' in castling rights");
-                rights |= 4;
-                hask = true;
-                break;
-            case 'q':
-                if (hasq) throw InvalidFenException("Duplicate 'q' in castling rights");
-                rights |= 8;
-                hasq = true;
-                break;
-            default:
-                throw InvalidFenException(std::string("Invalid castling character: ") + c);
+        // --- 6. FULLMOVE NUMBER ---
+        static void parseFullmoveNumber(std::string_view full, State& outState)
+        {
+            int val = 1;
+            try { val = std::stoi(std::string(full)); }
+            catch (...) {}
+            outState.modifyMeta(SLOT_FULL_MOVE)->configureMeta(FULL_MOVE, Defs::kNoOwner, static_cast<float>(val));
+        }
+
+    public:
+        [[nodiscard]] static bool tryGetFenState(std::string_view fen, State& outState) noexcept
+        {
+            try
+            {
+                getFenState(fen, outState);
+                return true;
+            }
+            catch (...)
+            {
+                return false;
             }
         }
 
-        out.meta.castlingRights = rights;
-    }
+        /// @brief Parse une chaîne FEN et remplit l'état FactStateT.
+        /// @throw InvalidFenException si le format est incorrect.
+        static void getFenState(std::string_view fen, State& outState)
+        {
+            // 1. Reset complet de l'état (tout à OFF_BOARD / 0)
+            // Note : le constructeur de FactStateT appelle déjà clear(), mais on assure le coup.
+            outState.clear();
 
-    /// @brief Parse la case en passant (champ 4)
-    static void parseEnPassantSquare(std::string_view enPassant, ObsState& out) {
-        if (enPassant.empty()) {
-            throw InvalidFenException("En passant field is empty");
-        }
-
-        if (enPassant == "-") {
-            out.meta.enPassant = 0xFF; // Convention: 0xFF = no en passant
-            return;
-        }
-
-        if (enPassant.size() != 2) {
-            throw InvalidFenException("En passant square must be 2 characters (e.g., 'e3')");
-        }
-
-        char fileChar = enPassant[0];
-        char rankChar = enPassant[1];
-
-        if (fileChar < 'a' || fileChar > 'h') {
-            throw InvalidFenException("En passant file must be between 'a' and 'h'");
-        }
-        if (rankChar < '1' || rankChar > '8') {
-            throw InvalidFenException("En passant rank must be between '1' and '8'");
-        }
-
-        int file = fileChar - 'a';  // 0-7
-        int rank = rankChar - '1';  // 0-7
-
-        // En passant is only valid on rank 3 (index 2) for white or rank 6 (index 5) for black
-        if (rank != 2 && rank != 5) {
-            throw InvalidFenException("En passant square must be on rank 3 or rank 6");
-        }
-
-        out.meta.enPassant = static_cast<std::uint8_t>(rank * 8 + file);
-    }
-
-    /// @brief Parse le compteur de demi-coups (champ 5)
-    static void parseHalfmoveClock(std::string_view halfmove, ObsState& out) {
-        if (halfmove.empty()) {
-            throw InvalidFenException("Halfmove clock field is empty");
-        }
-
-        int value = 0;
-        for (char c : halfmove) {
-            if (!std::isdigit(c)) {
-                throw InvalidFenException("Halfmove clock must be a number");
+            if (fen.empty()) {
+                throw InvalidFenException("FEN string is empty");
             }
-            value = value * 10 + (c - '0');
-            if (value > 255) {
-                throw InvalidFenException("Halfmove clock too large (max 255)");
+
+            // 2. Découpage des champs (Board, Turn, Castling, EnPassant, Half, Full)
+            Vec<std::string_view> fields = splitFen(fen);
+            if (fields.size() < 4) {
+                // Un FEN valide doit avoir au moins Board, Turn, Castling, EnPassant
+                throw InvalidFenException("FEN too short (needs at least 4 fields)");
             }
+
+            // 3. Parsing des champs
+            parseBoard(fields[0], outState);
+            parseActiveColor(fields[1], outState);
+            parseCastlingRights(fields[2], outState);
+            parseEnPassant(fields[3], outState, fields[1]);
+
+            // Champs optionnels (Clocks)
+            if (fields.size() >= 5) parseHalfmoveClock(fields[4], outState);
+            if (fields.size() >= 6) parseFullmoveNumber(fields[5], outState);
         }
-
-        out.meta.halfmoveClock = static_cast<std::uint8_t>(value);
-    }
-
-    /// @brief Parse le numéro de coup complet (champ 6)
-    static void parseFullmoveNumber(std::string_view fullmove, ObsState& out) {
-        if (fullmove.empty()) {
-            throw InvalidFenException("Fullmove number field is empty");
-        }
-
-        int value = 0;
-        for (char c : fullmove) {
-            if (!std::isdigit(c)) {
-                throw InvalidFenException("Fullmove number must be a number");
-            }
-            value = value * 10 + (c - '0');
-            if (value > 65535) {
-                throw InvalidFenException("Fullmove number too large (max 65535)");
-            }
-        }
-
-        if (value < 1) {
-            throw InvalidFenException("Fullmove number must be at least 1");
-        }
-
-        out.meta.fullmoveNumber = static_cast<std::uint16_t>(value);
-    }
-};
+    };
+}

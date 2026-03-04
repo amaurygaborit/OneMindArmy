@@ -22,7 +22,7 @@ backend:
 # ==========================================
 engine:
   memory:
-    maxNodes: 1000000
+    maxNodes: 10000000
     memoryThreshold: 0.90
     reuseTree: true
 
@@ -71,5 +71,5 @@ specific:
   render:
     whiteAtBottom: true
     showCoordinates: true
-    replaceRendering: true
+    replaceRendering: false
     renderRawState: false

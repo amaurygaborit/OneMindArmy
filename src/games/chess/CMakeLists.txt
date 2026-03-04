@@ -11,6 +11,7 @@ add_library(chess_objects OBJECT
 
 target_include_directories(chess_objects PRIVATE
   ${CMAKE_SOURCE_DIR}/src/corelib
+  ${TENSORRT_INCLUDE_DIR}
 )
 
 target_link_libraries(chess_objects PRIVATE

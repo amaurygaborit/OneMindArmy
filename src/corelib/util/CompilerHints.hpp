@@ -1,27 +1,29 @@
 #pragma once
 
-#if defined(_MSC_VER) && _MSVC_LANG >= 201703L  // Visual Studio avec C++17
-#define ALWAYS_INLINE inline __forceinline
-#elif defined(__GNUC__) || defined(__clang__)  // GCC ou Clang
-#define ALWAYS_INLINE [[gnu::always_inline]] inline
+// ============================================================================
+// COMPILER HINTS (Global Macros)
+// ============================================================================
+// Note: Les macros sont globales, pas de namespace possible.
+
+// --- INLINING FORCÉ ---
+
+#if defined(_MSC_VER)
+#define ALWAYS_INLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define ALWAYS_INLINE inline __attribute__((always_inline))
 #else
-#define ALWAYS_INLINE inline  // Fallback pour autres compilateurs
+#define ALWAYS_INLINE inline
 #endif
 
-#ifdef _MSC_VER
-// Visual Studio
-#if _MSC_VER >= 1926 && _MSVC_LANG >= 202002L
-#define LIKELY(x) [[likely]] x
-#define UNLIKELY(x) [[unlikely]] x
+// --- BRANCH PREDICTION (Optimization) ---
+// Note: On n'utilise pas [[likely]] ici car il ne s'applique pas aux expressions.
+// Pour MSVC, on laisse l'expression telle quelle (le compilateur est assez malin).
+
+#if defined(__GNUC__) || defined(__clang__)
+#define LIKELY(x)   (__builtin_expect(!!(x), 1))
+#define UNLIKELY(x) (__builtin_expect(!!(x), 0))
 #else
-#define LIKELY(x) (x)
+    // Fallback neutre (MSVC ou autres)
+#define LIKELY(x)   (x)
 #define UNLIKELY(x) (x)
-#endif
-#elif defined(__GNUC__) || defined(__clang__)
-// GCC/Clang
-#define LIKELY(x) __builtin_expect(!!(x), 1)
-#define UNLIKELY(x) __builtin_expect(!!(x), 0)
-#else
-#define LIKELY(x) (x)
-#define UNLIKELY(x) (x)
-#endif
+#endif.
