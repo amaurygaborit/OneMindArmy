@@ -54,12 +54,11 @@ git clone https://github.com/amaurygaborit/OneMindArmy.git
 cd OneMindArmy
 ```
 
-2. Clone external dependencies (YAML-CPP, etc.)
-```bash
-git clone https://github.com/jbeder/yaml-cpp.git external/yaml-cpp
-```
+2. Install TensorRT
+install tensorRT from nvidia and put it in a folder
+create a path environment named "TRT_ROOT" pointing to your folder
 
-3. Configure and Build
+4. Configure and Build
 ```bash
 mkdir build && cd build
 ```
