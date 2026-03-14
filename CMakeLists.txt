@@ -45,6 +45,7 @@ set(CMAKE_CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
 
 find_package(CUDAToolkit REQUIRED)
 message(STATUS "[OneMindArmy] CUDA Toolkit Version: ${CUDAToolkit_VERSION}")
+include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
 # --- DEPENDENCY: YAML-CPP ---
 include(FetchContent)

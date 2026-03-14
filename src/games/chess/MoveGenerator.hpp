@@ -1,5 +1,12 @@
 ﻿#pragma once
+#if defined(_MSC_VER)
+// Pour Windows (Visual Studio)
 #include <intrin.h>
+#else
+// Pour Linux (GCC/Clang)
+#include <x86intrin.h>
+#include <immintrin.h>
+#endif
 
 #include "ChessTypes.hpp"
 #include "Tables.hpp"

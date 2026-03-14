@@ -26,4 +26,4 @@
     // Fallback neutre (MSVC ou autres)
 #define LIKELY(x)   (x)
 #define UNLIKELY(x) (x)
-#endif.
+#endif

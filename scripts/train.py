@@ -211,12 +211,13 @@ def run_training(config_path: str):
     mse_criterion = nn.MSELoss()
 
     # 4. Loop
-    model.train()
-    start_time = time.time()
-
     for epoch in range(epochs):
+        model.train()
         epoch_v_loss = 0.0
         epoch_p_loss = 0.0
+        
+        # CORRECTION 1: On lance le chrono au début de chaque epoch !
+        epoch_start_time = time.time()
         
         for batch_idx, (states, target_policies, target_results) in enumerate(dataloader):
             states = states.to(device, non_blocking=True)
@@ -243,11 +244,17 @@ def run_training(config_path: str):
             epoch_v_loss += v_loss.item()
             epoch_p_loss += p_loss.item()
 
-            if batch_idx % 100 == 0:
-                elapsed = time.time() - start_time
-                samples_per_sec = (batch_idx * batch_size) / (elapsed if elapsed > 0 else 1)
+            # On n'affiche pas au batch 0 car (0 * batch_size) / elapsed = 0
+            if batch_idx % 100 == 0 and batch_idx > 0:
+                elapsed = time.time() - epoch_start_time
+                samples_per_sec = (batch_idx * batch_size) / elapsed
                 print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx}/{len(dataloader)}] | "
                       f"V-Loss: {v_loss.item():.4f} | P-Loss: {p_loss.item():.4f} | {samples_per_sec:.0f} spl/s")
+
+        # CORRECTION 2: On affiche la moyenne de l'epoch à la fin !
+        avg_v_loss = epoch_v_loss / len(dataloader)
+        avg_p_loss = epoch_p_loss / len(dataloader)
+        print(f">>> End of Epoch {epoch+1} | Avg V-Loss: {avg_v_loss:.4f} | Avg P-Loss: {avg_p_loss:.4f}\n")
 
     # 5. Save & Export
     torch.save(model.state_dict(), pt_path)
@@ -262,6 +269,7 @@ def run_training(config_path: str):
     )
 
     print(f"\n[Pipeline] Training Cycle Finished. Model: {pt_path.parent.name}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OneMindArmy Trainer")
