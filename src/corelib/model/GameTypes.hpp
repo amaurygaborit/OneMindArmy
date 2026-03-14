@@ -226,6 +226,12 @@ namespace Core
         static constexpr uint32_t kNumPlayers = GT::kNumPlayers;
         static constexpr uint32_t kNumPos = GT::kNumPos;
         static constexpr uint32_t kMaxValidActions = GT::kMaxValidActions;
+
+        static constexpr uint32_t kMaxHistory = GT::kMaxHistory;
+        static constexpr uint32_t kTokenDim = 4 + kNumPos;
+        static constexpr uint32_t kNNSequenceLength = kMaxFacts + kMaxHistory;
+        static constexpr uint32_t kNNInputSize = kNNSequenceLength * kTokenDim;
+
         static constexpr uint32_t kActionSpace = GT::kActionSpace;
 
         // ====================================================================
@@ -262,7 +268,7 @@ namespace Core
     };
 
     // ========================================================================
-    // ATOM — Lightweight base entity
+    // ATOM — Base entity
     // ========================================================================
 
     template<ValidGameTraits GT>
@@ -275,9 +281,9 @@ namespace Core
         using FactType = Defs::FactType;
 
     protected:
+        float    m_value = 0.0f;
         FId      m_factId = Defs::kPadFact;
         OId      m_ownerId = Defs::kNoOwner;
-        float    m_value = 0.0f;
         FactType m_type = FactType::PAD;
 
     public:

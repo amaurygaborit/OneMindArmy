@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <stdexcept>
 #include <memory>
+#include <iostream>
 #include <yaml-cpp/yaml.h>
 
 namespace Core
@@ -10,17 +11,20 @@ namespace Core
     // ========================================================================
     // 1. L'INTERFACE (Contrat)
     // ========================================================================
-    // Tout jeu doit savoir s'exécuter à partir d'une config YAML.
+    // Tout jeu doit savoir s'exécuter à partir d'une config YAML et des arguments CLI.
     struct IGameRunner
     {
         virtual ~IGameRunner() = default;
-        virtual void run(const YAML::Node& config) const = 0;
+
+        // --- NOUVELLE SIGNATURE STRICTE ---
+        // Le mode et le chemin du modèle sont injectés explicitement sans polluer le YAML.
+        virtual void run(const YAML::Node& config, const std::string& mode, const std::string& modelPath) const = 0;
     };
 
     // ========================================================================
     // 2. LE REGISTRE (Conteneur Singleton)
     // ========================================================================
-    // Il stocke les pointeurs vers les IGameRunner.
+    // Il stocke les pointeurs vers les IGameRunner (Les Bootstrappers).
     class GameRegistry
     {
     private:
@@ -56,10 +60,10 @@ namespace Core
             return it->second;
         }
 
-        // Helper pour lancer directement
-        void run(const std::string& name, const YAML::Node& config) const
+        // Helper pour lancer directement (Signature mise à jour pour correspondre au main.cpp)
+        void run(const std::string& name, const YAML::Node& config, const std::string& mode, const std::string& modelPath) const
         {
-            get(name)->run(config);
+            get(name)->run(config, mode, modelPath);
         }
     };
 }

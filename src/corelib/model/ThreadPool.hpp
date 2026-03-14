@@ -1,4 +1,5 @@
 #pragma once
+
 #include <mutex>
 #include <condition_variable>
 #include <thread>
@@ -7,16 +8,18 @@
 #include <algorithm>
 #include <memory>
 #include <cmath>
+#include <chrono>
+#include <iostream>
+#include <cuda_runtime.h>
 
 #include "TreeSearch.hpp"
-#include "NeuralNet.cuh"
-#include "../bootstrap/GameConfig.hpp"
+#include "NeuralNet.hpp"
 #include "../util/AlignedVec.hpp"
 
 namespace Core
 {
     // ============================================================================
-    // BLOCKING QUEUE ROBUSTE
+    // ROBUST THREAD-SAFE BLOCKING QUEUE
     // ============================================================================
     template<typename T>
     class BlockingQueue
@@ -31,6 +34,7 @@ namespace Core
         std::condition_variable m_cv_push;
         std::condition_variable m_cv_pop;
         bool m_closed = false;
+        bool m_fastDrain = false;
 
     public:
         BlockingQueue(size_t capacity)
@@ -39,16 +43,20 @@ namespace Core
         {
         }
 
-        void close() {
+        void close(bool fastDrain = false)
+        {
             {
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_closed = true;
+                m_fastDrain = fastDrain;
+                if (m_fastDrain) m_count = 0; // Drop pending items immediately
             }
             m_cv_push.notify_all();
             m_cv_pop.notify_all();
         }
 
-        bool push(const T& item) {
+        bool push(const T& item)
+        {
             std::unique_lock<std::mutex> lock(m_mutex);
             m_cv_push.wait(lock, [this] { return m_count < m_capacity || m_closed; });
             if (m_closed) return false;
@@ -62,15 +70,20 @@ namespace Core
             return true;
         }
 
-        size_t pop_batch(AlignedVec<T>& out, size_t maxItems, std::chrono::microseconds timeout) {
+        size_t pop_batch(AlignedVec<T>& out, size_t maxItems, std::chrono::microseconds timeout)
+        {
             std::unique_lock<std::mutex> lock(m_mutex);
 
-            if (!m_cv_pop.wait_for(lock, timeout, [this] { return m_count > 0 || m_closed; })) {
-                return 0;
-            }
-            if (m_closed && m_count == 0) return 0;
+            m_cv_pop.wait_for(lock, timeout, [this, maxItems] {
+                return m_count >= maxItems || m_closed;
+                });
+
+            if (m_closed && (m_count == 0 || m_fastDrain)) return 0;
 
             size_t n = std::min(m_count, maxItems);
+
+            if (n == 0) return 0;
+
             for (size_t i = 0; i < n; ++i) {
                 out.push_back(m_buffer[m_head]);
                 m_head = (m_head + 1) % m_capacity;
@@ -82,10 +95,11 @@ namespace Core
             return n;
         }
 
-        bool pop(T& out) {
+        bool pop(T& out)
+        {
             std::unique_lock<std::mutex> lock(m_mutex);
             m_cv_pop.wait(lock, [this] { return m_count > 0 || m_closed; });
-            if (m_count == 0 && m_closed) return false;
+            if (m_closed && (m_count == 0 || m_fastDrain)) return false;
 
             out = m_buffer[m_head];
             m_head = (m_head + 1) % m_capacity;
@@ -98,7 +112,7 @@ namespace Core
     };
 
     // ============================================================================
-    // THREAD POOL
+    // THREAD POOL (Asynchronous Multi-Tree & Multi-GPU Engine)
     // ============================================================================
     template<ValidGameTraits GT>
     class ThreadPool
@@ -108,231 +122,257 @@ namespace Core
         using Event = NodeEvent<GT>;
         using ModelResults = ModelResultsT<GT>;
 
+        struct TreeTask {
+            TreeSearch<GT>* tree;
+            uint32_t targetSims;
+            bool isSelfPlay;
+        };
+
+        struct EvalTask {
+            TreeSearch<GT>* tree;
+            Event* ctx;
+            uint32_t targetSims;
+            bool isSelfPlay;
+        };
+
         std::shared_ptr<IEngine<GT>> m_engine;
         AlignedVec<std::unique_ptr<NeuralNet<GT>>> m_neuralNets;
-        std::atomic<TreeSearch<GT>*> m_currentTree{ nullptr };
-
         AlignedVec<std::unique_ptr<Event>> m_eventPool;
 
-        BlockingQueue<Event*> m_qFree;
-        BlockingQueue<Event*> m_qEval;
-        BlockingQueue<Event*> m_qBackprop;
+        BlockingQueue<TreeTask> m_qReadyTrees;
+        BlockingQueue<Event*>   m_qFree;
+        BlockingQueue<EvalTask> m_qEval;
+        BlockingQueue<EvalTask> m_qBackprop;
 
         std::vector<std::thread> m_workers;
-
         std::atomic<bool> m_running{ true };
-        std::atomic<uint32_t> m_activeJobs{ 0 };
-        std::atomic<uint32_t> m_targetSims{ 0 };
+        bool m_fastDrain;
 
+        std::atomic<uint32_t> m_pendingSimulations{ 0 };
         std::mutex m_mainMutex;
         std::condition_variable m_mainCV;
+
+        std::atomic<uint32_t> m_starvationCount{ 0 };
 
     public:
         ThreadPool(std::shared_ptr<IEngine<GT>> engine,
             AlignedVec<std::unique_ptr<NeuralNet<GT>>>&& nets,
-            const SystemConfig& sysCfg,
-            const TreeSearchConfig& tsCfg)
+            const BackendConfig& backendCfg,
+            const EngineConfig& engineCfg)
             : m_engine(engine)
             , m_neuralNets(std::move(nets))
-            , m_qFree(sysCfg.batchSize* m_neuralNets.size() * 2 + 256)
-            , m_qEval(sysCfg.batchSize* m_neuralNets.size() * 2 + 256)
-            , m_qBackprop(sysCfg.batchSize* m_neuralNets.size() * 2 + 256)
-            , m_eventPool(reserve_only, sysCfg.batchSize* m_neuralNets.size() * 2 + 256)
+            , m_fastDrain(backendCfg.fastDrain)
+            , m_qReadyTrees(static_cast<size_t>(backendCfg.numParallelGames * 4 * backendCfg.queueScale))
+            , m_qFree(static_cast<size_t>(backendCfg.numParallelGames* m_neuralNets.size()* backendCfg.queueScale * 2 + 256))
+            , m_qEval(static_cast<size_t>(backendCfg.numParallelGames* m_neuralNets.size()* backendCfg.queueScale * 2 + 256))
+            , m_qBackprop(static_cast<size_t>(backendCfg.numParallelGames* m_neuralNets.size()* backendCfg.queueScale * 2 + 256))
+            , m_eventPool(reserve_only, static_cast<size_t>(backendCfg.numParallelGames* m_neuralNets.size()* backendCfg.queueScale * 2 + 256))
         {
-            size_t nContexts = sysCfg.batchSize * m_neuralNets.size() * 2 +
-                sysCfg.numSearchThreads + sysCfg.numBackpropThreads + 64;
-
+            size_t nContexts = m_eventPool.capacity();
             for (size_t i = 0; i < nContexts; ++i) {
-                m_eventPool.push_back(std::make_unique<Event>(tsCfg.historySize, tsCfg.maxDepth));
+                m_eventPool.push_back(std::make_unique<Event>(engineCfg.maxDepth));
                 m_qFree.push(m_eventPool.back().get());
             }
 
-            for (int i = 0; i < sysCfg.numSearchThreads; ++i) {
+            for (uint32_t i = 0; i < backendCfg.numSearchThreads; ++i) {
                 m_workers.emplace_back(&ThreadPool::loopGather, this);
             }
-            for (size_t g = 0; g < m_neuralNets.size(); ++g) {
-                for (int k = 0; k < sysCfg.numInferenceThreadsPerGPU; ++k) {
-                    m_workers.emplace_back(&ThreadPool::loopInference, this, g, sysCfg.batchSize);
+
+            for (uint32_t g = 0; g < m_neuralNets.size(); ++g) {
+                for (uint32_t k = 0; k < backendCfg.numInferenceThreads; ++k) {
+                    m_workers.emplace_back(&ThreadPool::loopInference, this, g, backendCfg.maxBatchSize);
                 }
             }
-            for (int i = 0; i < sysCfg.numBackpropThreads; ++i) {
+
+            for (uint32_t i = 0; i < backendCfg.numBackpropThreads; ++i) {
                 m_workers.emplace_back(&ThreadPool::loopBackprop, this);
             }
         }
 
-        ~ThreadPool() {
+        ~ThreadPool()
+        {
             m_running = false;
-            m_qFree.close();
-            m_qEval.close();
-            m_qBackprop.close();
-            for (auto& t : m_workers) if (t.joinable()) t.join();
+            m_qReadyTrees.close(m_fastDrain);
+            m_qFree.close(m_fastDrain);
+            m_qEval.close(m_fastDrain);
+            m_qBackprop.close(m_fastDrain);
+
+            for (auto& t : m_workers) {
+                if (t.joinable()) t.join();
+            }
+        }
+
+        void executeMultipleTrees(const std::vector<TreeSearch<GT>*>& trees, uint32_t numSims)
+        {
+            if (trees.empty() || numSims == 0) return;
+
+            for (auto* tree : trees) {
+                tree->resetCounters();
+            }
+
+            uint32_t totalSims = static_cast<uint32_t>(trees.size()) * numSims;
+            m_pendingSimulations.store(totalSims, std::memory_order_release);
+
+            bool isSelfPlay = (trees.size() > 1);
+            for (auto* tree : trees) {
+                m_qReadyTrees.push({ tree, numSims, isSelfPlay });
+            }
+
+            std::unique_lock<std::mutex> lock(m_mainMutex);
+            m_mainCV.wait(lock, [&]() {
+                return m_pendingSimulations.load(std::memory_order_acquire) == 0;
+                });
         }
 
         void executeTreeSearch(TreeSearch<GT>* tree, uint32_t numSims)
         {
-            m_currentTree.store(tree, std::memory_order_release);
-            m_targetSims.store(numSims, std::memory_order_relaxed);
-
-            std::unique_lock<std::mutex> lock(m_mainMutex);
-            m_mainCV.wait(lock, [&]() {
-                bool simDone = tree->getSimulationCount() >= numSims;
-                bool jobsDone = m_activeJobs.load(std::memory_order_relaxed) == 0;
-                return simDone && jobsDone;
-                });
-            m_currentTree.store(nullptr, std::memory_order_release);
+            executeMultipleTrees({ tree }, numSims);
         }
 
     private:
+        // ========================================================================
+        // WORKER 1: Gather (Tree Traversal)
+        // ========================================================================
         void loopGather()
         {
+            TreeTask tTask;
             Event* ctx = nullptr;
+
             while (m_running)
             {
-                // 1. Lecture SÉCURISÉE (atomique) du pointeur de l'arbre
-                TreeSearch<GT>* tree = m_currentTree.load(std::memory_order_acquire);
-
-                // 2. Mode "Veille" (Évite de brûler le CPU à 100% quand l'IA ne réfléchit pas)
-                if (!tree || tree->getSimulationCount() >= m_targetSims.load(std::memory_order_relaxed)) {
-                    // On dort 1 milliseconde et on recommence la boucle.
-                    // Ça consomme 0% de CPU.
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1));
-                    continue;
+                if (!m_qReadyTrees.pop(tTask)) break;
+                if (!m_qFree.pop(ctx))
+                {
+                    m_starvationCount.fetch_add(1, std::memory_order_relaxed);
+                    std::cout << "[ThreadPool] Warning: Free context starvation! (Count: " << m_starvationCount.load() << ")\n";
+                    break;
                 }
 
-                // 3. On attend qu'un contexte mémoire soit libre pour travailler
-                if (!m_qFree.pop(ctx)) break; // Si le programme se ferme (m_closed), on quitte
-
-                // 4. On déclare qu'on commence un travail AVANT de faire quoi que ce soit
-                // C'est ça qui empêche le thread principal de détruire l'arbre sous notre nez !
-                m_activeJobs.fetch_add(1, std::memory_order_acquire);
-
-                // 5. DOUBLE VÉRIFICATION (La clé de la sécurité)
-                // Entre le moment où on s'est réveillé et maintenant, le thread principal
-                // a peut-être annulé l'arbre ou fini la recherche. On relit le pointeur !
-                tree = m_currentTree.load(std::memory_order_acquire);
-
-                if (!tree || tree->getSimulationCount() >= m_targetSims.load(std::memory_order_relaxed)) {
-                    // Fausse alerte : le travail est déjà fini.
-                    // On range le contexte, on annule notre job et on prévient le thread principal.
+                if (tTask.tree->incrementLaunched() > tTask.targetSims)
+                {
                     m_qFree.push(ctx);
-                    m_activeJobs.fetch_sub(1, std::memory_order_release);
-                    m_mainCV.notify_all();
                     continue;
                 }
 
-                // 6. LE VRAI TRAVAIL (On utilise la variable locale 'tree', jamais m_currentTree ici)
-                bool needEval = tree->gather(*ctx);
+                // ROUTEUR : En Inférence (!isSelfPlay), on permet l'exploration massive (Swarm)
+                if (!tTask.isSelfPlay && tTask.tree->getLaunchedCount() < tTask.targetSims) {
+                    m_qReadyTrees.push(tTask);
+                }
 
-                // 7. Routage du contexte
+                bool needEval = tTask.tree->gather(*ctx);
+                EvalTask eTask{ tTask.tree, ctx, tTask.targetSims, tTask.isSelfPlay };
+
                 if (needEval) {
-                    m_qEval.push(ctx); // Le noeud a besoin du GPU
+                    m_qEval.push(eTask);
                 }
                 else {
-                    m_qBackprop.push(ctx); // Le noeud est terminal, on met à jour direct
+                    m_qBackprop.push(eTask);
                 }
             }
         }
 
-        void loopInference(size_t gpuIdx, uint32_t batchSize)
+        // ========================================================================
+        // WORKER 2: Inference (GPU Context Binding & Dynamic Batching)
+        // ========================================================================
+        void loopInference(size_t gpuIdx, uint32_t maxBatchSize)
         {
-            AlignedVec<Event*> batchEvents(reserve_only, batchSize);
-            AlignedVec<State> batchStates(reserve_only, batchSize);
-            AlignedVec<AlignedVec<Action>> batchHistories(reserve_only, batchSize);
-            AlignedVec<ModelResults> batchOutputs(reserve_only, batchSize);
+            cudaError_t err = cudaSetDevice(static_cast<int>(gpuIdx));
+            if (err != cudaSuccess) {
+                std::cerr << "[ThreadPool] Fatal Error: Failed to bind thread to GPU " << gpuIdx << "!\n";
+                return;
+            }
+
+            AlignedVec<EvalTask> batchTasks(reserve_only, maxBatchSize);
+            AlignedVec<std::array<float, Defs::kNNInputSize>> batchInputs(reserve_only, maxBatchSize);
+            AlignedVec<ModelResults> batchOutputs(reserve_only, maxBatchSize);
 
             auto& net = m_neuralNets[gpuIdx];
 
             while (m_running)
             {
-                batchEvents.clear();
-                size_t count = m_qEval.pop_batch(batchEvents, batchSize, std::chrono::microseconds(200));
+                batchTasks.clear();
+                size_t count = m_qEval.pop_batch(batchTasks, maxBatchSize, std::chrono::microseconds(1000));
                 if (count == 0) continue;
 
-                batchStates.clear();
-                batchHistories.clear();
-
-                for (auto* e : batchEvents) {
-                    batchStates.push_back(e->nnInputState);
-                    batchHistories.push_back(e->nnInputHistory);
-                }
-
+                batchInputs.clear();
                 batchOutputs.resize(count);
 
-                // Exécution PyTorch / TensorRT 
-                net->forwardBatch(batchStates, batchHistories, batchOutputs);
+                for (const auto& task : batchTasks) {
+                    batchInputs.push_back(task.ctx->nnInput);
+                }
+
+                net->forwardBatch(batchInputs, batchOutputs);
 
                 for (size_t i = 0; i < count; ++i) {
-                    Event* e = batchEvents[i];
+                    EvalTask& eTask = batchTasks[i];
+                    Event* e = eTask.ctx;
                     const auto& res = batchOutputs[i];
 
-                    // 1. Mise à jour des Values
                     for (size_t p = 0; p < Defs::kNumPlayers; ++p) {
                         e->values[p] = res.values[p];
                     }
 
-                    // 2. Mise à jour de la Policy (avec std::array)
-                    // La policy de l'Event a déjà été remise à 0.0f par ctx.reset() dans gather() !
                     float sum = 0.0f;
-
                     for (const auto& act : e->validActions) {
                         uint32_t idx = m_engine->actionToIdx(act);
-
-                        // Sécurité : on s'assure que l'index renvoyé par l'engine est valide
                         if (idx < Defs::kActionSpace && idx < res.policy.size()) {
                             float p = res.policy[idx];
-                            e->policy[idx] = p; // On écrit directement à l'index absolu !
+                            e->policy[idx] = p;
                             sum += p;
                         }
                     }
 
-                    // Normalisation sur les coups légaux uniquement
                     if (sum > 1e-9f) {
                         float invSum = 1.0f / sum;
-                        // On ne parcourt QUE les coups valides pour optimiser
                         for (const auto& act : e->validActions) {
                             uint32_t idx = m_engine->actionToIdx(act);
-                            if (idx < Defs::kActionSpace) {
-                                e->policy[idx] *= invSum;
-                            }
+                            if (idx < Defs::kActionSpace) e->policy[idx] *= invSum;
                         }
                     }
                     else if (!e->validActions.empty()) {
-                        // Fallback : Si le réseau donne 0 partout, on met une proba uniforme
                         float uniform = 1.0f / e->validActions.size();
                         for (const auto& act : e->validActions) {
                             uint32_t idx = m_engine->actionToIdx(act);
-                            if (idx < Defs::kActionSpace) {
-                                e->policy[idx] = uniform;
-                            }
+                            if (idx < Defs::kActionSpace) e->policy[idx] = uniform;
                         }
                     }
 
-                    m_qBackprop.push(e);
+                    m_qBackprop.push(eTask);
                 }
             }
         }
 
+        // ========================================================================
+        // WORKER 3: Backpropagation (Updating the Tree & Removing Virtual Loss)
+        // ========================================================================
         void loopBackprop()
         {
-            Event* ctx = nullptr;
+            EvalTask eTask;
             while (m_running)
             {
-                if (!m_qBackprop.pop(ctx)) break;
+                if (!m_qBackprop.pop(eTask)) break;
 
-                TreeSearch<GT>* tree = m_currentTree.load(std::memory_order_acquire);
-                if (tree) {
-                    tree->backprop(*ctx);
+                // 1. EXTRACTION CRITIQUE : Lire l'état de collision AVANT de libérer le contexte
+                bool wasCollision = eTask.ctx->collision;
+
+                // 2. BACKPROP : Mettre à jour l'arbre (les collisions sont gérées à l'intérieur)
+                eTask.tree->backprop(*(eTask.ctx));
+
+                // 3. LIBÉRATION SÉCURISÉE : L'événement peut maintenant être réutilisé
+                m_qFree.push(eTask.ctx);
+
+                // 4. ROUTEUR HYBRIDE : Faut-il remettre l'arbre dans la boucle ?
+                //  - En Self-Play, on remet l'arbre TOUJOURS ici (pour garantir 1 thread max).
+                //  - En Inférence, on ne le remet ICI que s'il a crashé (Collision) et qu'on doit rattraper la simulation perdue.
+                if ((eTask.isSelfPlay || wasCollision) && eTask.tree->getLaunchedCount() < eTask.targetSims) {
+                    m_qReadyTrees.push({ eTask.tree, eTask.targetSims, eTask.isSelfPlay });
                 }
 
-                m_qFree.push(ctx);
-
-                uint32_t remaining = m_activeJobs.fetch_sub(1, std::memory_order_relaxed) - 1;
-
-                if (tree &&
-                    tree->getSimulationCount() >= m_targetSims.load(std::memory_order_relaxed) &&
-                    remaining == 0)
-                {
-                    m_mainCV.notify_all();
+                // 5. SYNCHRONISATION GLOBALE : Uniquement si la simulation était valide !
+                if (!wasCollision) {
+                    if (m_pendingSimulations.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                        m_mainCV.notify_all(); // Fin totale !
+                    }
                 }
             }
         }

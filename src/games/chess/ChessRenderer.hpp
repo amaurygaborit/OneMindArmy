@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "../../corelib/interfaces/IRenderer.hpp"
 #include "ChessTypes.hpp"
 
@@ -12,21 +12,22 @@ namespace Chess
 	private:
 		static constexpr const char* kColor[2] = { "White", "Black" };
 		static constexpr const char* kPiecesName[6] = { "Pawns", "Knights", "Bishops", "Rooks", "Queens", "King" };
+		// Encodage UTF-8 brut (Bypass MSVC encoding issues)
 		static constexpr const char* kPiecesSymbol[13] =
 		{
-			"\u00A0",    // 0 : Empty square
-			"\u2659",    // 1 : White pawn
-			"\u2658",    // 2 : White knight
-			"\u2657",    // 3 : White bishop
-			"\u2656",    // 4 : White rook
-			"\u2655",    // 5 : White queen
-			"\u2654",    // 6 : White king
-			"\u265F",    // 7 : Black pawn
-			"\u265E",    // 8 : Black knight
-			"\u265D",    // 9 : Black bishop
-			"\u265C",    //10 : Black rook
-			"\u265B",    //11 : Black queen
-			"\u265A"     //12 : Black king
+			" ",           // 0 : Empty square
+			"\xE2\x99\x99", // 1 : White pawn   (♔)
+			"\xE2\x99\x98", // 2 : White knight (♘)
+			"\xE2\x99\x97", // 3 : White bishop (♗)
+			"\xE2\x99\x96", // 4 : White rook   (♖)
+			"\xE2\x99\x95", // 5 : White queen  (♕)
+			"\xE2\x99\x94", // 6 : White king   (♔)
+			"\xE2\x99\x9F", // 7 : Black pawn   (♟)
+			"\xE2\x99\x9E", // 8 : Black knight (♞)
+			"\xE2\x99\x9D", // 9 : Black bishop (♝)
+			"\xE2\x99\x9C", //10 : Black rook   (♜)
+			"\xE2\x99\x9B", //11 : Black queen  (♛)
+			"\xE2\x99\x9A"  //12 : Black king   (♚)
 		};
 		static constexpr const char* kSquaresName[64] =
 		{

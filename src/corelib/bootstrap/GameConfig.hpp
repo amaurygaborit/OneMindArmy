@@ -1,37 +1,39 @@
 #pragma once
+
 #include <iostream>
-#include <yaml-cpp/yaml.h>
+#include <string>
 #include <cstdint>
-#include <cuda_runtime.h>
 #include <type_traits>
 #include <stdexcept>
+#include <yaml-cpp/yaml.h>
+#include <cuda_runtime.h>
 
 namespace Core
 {
-    // --- Helper de chargement sécurisé ---
+    // ============================================================================
+    // SAFE YAML LOADER HELPER
+    // Ensures missing fields or out-of-bounds values trigger explicit exceptions.
+    // ============================================================================
     template <typename T>
     T loadVal(const YAML::Node& node, const std::string& key, T minVal, T maxVal)
     {
         if (!node[key])
-            throw std::runtime_error("Config Error: Missing field '" + key + "'");
+            throw std::runtime_error("Config Error: Strict Mode - Missing mandatory field '" + key + "'");
 
         T val;
-
         try {
-            // Cas spécial : uint8_t est souvent lu comme un char par yaml-cpp
             if constexpr (std::is_same_v<T, uint8_t> || std::is_same_v<T, int8_t>) {
                 int temp = node[key].as<int>();
                 if (temp < static_cast<int>(minVal) || temp > static_cast<int>(maxVal))
                     throw std::runtime_error("Config Error: Value out of range for '" + key + "'");
                 return static_cast<T>(temp);
             }
-            // Cas général
             else {
                 val = node[key].as<T>();
             }
         }
         catch (const YAML::BadConversion& e) {
-            throw std::runtime_error("Config Error: Bad conversion for field '" + key + "'");
+            throw std::runtime_error("Config Error: Bad conversion (wrong type) for field '" + key + "'");
         }
 
         if (val < minVal || val > maxVal)
@@ -41,150 +43,190 @@ namespace Core
     }
 
     // ============================================================================
-    // 1. CONFIGURATION SYSTÈME (Hardware)
+    // 1. NETWORK CONFIGURATION 
     // ============================================================================
-    struct SystemConfig
+    struct NetworkConfig
     {
-        int numGPUs;
-        uint16_t batchSize;
-        uint8_t numSearchThreads;
-        uint8_t numBackpropThreads;
-        uint8_t numInferenceThreadsPerGPU;
-        float queueScale;
-        bool fastDrain;
+        uint32_t dModel = 0;
+        uint32_t nHeads = 0;
+        uint32_t nLayers = 0;
+        uint32_t dimFeedforward = 0;
+        float weightDecay = 0.0f; // Remplaçant de dropout !
 
-        void load(const YAML::Node& root)
+        void load(const YAML::Node& root, const std::string& runMode)
         {
-            const auto& node = root["backend"];
+            const auto& node = root["network"];
 
-            batchSize = loadVal<uint16_t>(node["device"], "maxBatchSize", 1, UINT16_MAX);
-
-            int availableGPUs = 0;
-            cudaGetDeviceCount(&availableGPUs);
-            try {
-                std::string val = node["device"]["numGPUs"].as<std::string>();
-                if (val == "auto") numGPUs = availableGPUs;
-                else {
-                    int cfg = std::stoi(val);
-                    numGPUs = (cfg <= 0 || cfg > availableGPUs) ? availableGPUs : cfg;
-                }
+            // Le réseau est obligatoire pour l'entraînement ou l'export. En mode play, TensorRT s'en fiche.
+            if (!node) {
+                if (runMode == "train" || runMode == "export-meta")
+                    throw std::runtime_error("Config Error: Missing 'network' block (Mandatory for " + runMode + ").");
+                return; // Optionnel en mode "play"
             }
-            catch (...) { numGPUs = availableGPUs; }
 
-            numSearchThreads = loadVal<uint8_t>(node["threading"], "numSearchThreads", 1, UINT8_MAX);
-            numBackpropThreads = loadVal<uint8_t>(node["threading"], "numBackpropThreads", 1, UINT8_MAX);
-            numInferenceThreadsPerGPU = loadVal<uint8_t>(node["threading"], "numInferenceThreads", 1, UINT8_MAX);
-
-            queueScale = loadVal<float>(node["optimization"], "queueScale", 1.0f, 100.0f);
-            fastDrain = loadVal<bool>(node["optimization"], "fastDrain", 0, 1);
+            dModel = loadVal<uint32_t>(node, "dModel", 1u, 8192u);
+            nHeads = loadVal<uint32_t>(node, "nHeads", 1u, 128u);
+            nLayers = loadVal<uint32_t>(node, "nLayers", 1u, 128u);
+            dimFeedforward = loadVal<uint32_t>(node, "dimFeedforward", 1u, 32768u);
+            weightDecay = loadVal<float>(node, "weightDecay", 0.0f, 1.0f);
         }
     };
 
     // ============================================================================
-    // 2. CONFIGURATION MOTEUR (Tree Search)
+    // 2. ENGINE CONFIGURATION (MCTS)
     // ============================================================================
-    struct TreeSearchConfig
+    struct EngineConfig
     {
+        uint32_t numSimulations;
+        uint32_t maxDepth;
+        float cPUCT;
+        float virtualLoss;
+        float dirichletAlpha;
+        float dirichletEpsilon;
+        uint32_t temperatureDrop;
         uint32_t maxNodes;
         float memoryThreshold;
         bool reuseTree;
 
-        uint16_t maxDepth;
-        float cPUCT;
-        float virtualLoss;
-        uint16_t historySize;
-
-        void load(const YAML::Node& root)
+        void load(const YAML::Node& root, const std::string& /*runMode*/)
         {
             const auto& node = root["engine"];
+            if (!node) throw std::runtime_error("Config Error: Missing 'engine' block (Always mandatory).");
 
-            maxNodes = loadVal<uint32_t>(node["memory"], "maxNodes", 1000, UINT32_MAX);
-            memoryThreshold = loadVal<float>(node["memory"], "memoryThreshold", 0.1f, 1.0f);
-            reuseTree = loadVal<bool>(node["memory"], "reuseTree", 0, 1);
-
-            maxDepth = loadVal<uint16_t>(node["search"], "maxDepth", 1, UINT16_MAX);
-            cPUCT = loadVal<float>(node["search"], "cPUCT", 0.0f, 100.0f);
-            virtualLoss = loadVal<float>(node["search"], "virtualLoss", 0.0f, 100.0f);
-
-            historySize = loadVal<uint16_t>(node["network"], "historySize", 1, UINT8_MAX);
+            numSimulations = loadVal<uint32_t>(node, "numSimulations", 1u, UINT32_MAX);
+            maxDepth = loadVal<uint32_t>(node, "maxDepth", 1u, UINT16_MAX);
+            cPUCT = loadVal<float>(node, "cPUCT", 0.0f, 100.0f);
+            virtualLoss = loadVal<float>(node, "virtualLoss", 0.0f, 100.0f);
+            dirichletAlpha = loadVal<float>(node, "dirichletAlpha", 0.0f, 100.0f); // Peut être 0.0 en match
+            dirichletEpsilon = loadVal<float>(node, "dirichletEpsilon", 0.0f, 1.0f);
+            temperatureDrop = loadVal<uint32_t>(node, "temperatureDrop", 0u, 1000u);
+            maxNodes = loadVal<uint32_t>(node, "maxNodes", 1000u, UINT32_MAX);
+            memoryThreshold = loadVal<float>(node, "memoryThreshold", 0.1f, 1.0f);
+            reuseTree = loadVal<bool>(node, "reuseTree", false, true);
         }
     };
 
     // ============================================================================
-    // 3. CONFIGURATION RENDU (Display)
-    // ============================================================================
-    struct RendererConfig
-    {
-        bool renderState;
-        bool renderValidActions;
-        bool renderActionPlayed;
-        bool renderResult;
-
-        void load(const YAML::Node& root)
-        {
-            const auto& node = root["session"]["render"]; // Sous-section session
-
-            renderState = loadVal<bool>(node, "renderState", 0, 1);
-            renderValidActions = loadVal<bool>(node, "renderValidActions", 0, 1);
-            renderActionPlayed = loadVal<bool>(node, "renderActionPlayed", 0, 1);
-            renderResult = loadVal<bool>(node, "renderResult", 0, 1);
-        }
-    };
-
-    // ============================================================================
-    // 4. CONFIGURATION SESSION (Match)
-    // ============================================================================
-    // C'est ici qu'on a besoin du Template GameConfig (ex: ChessTypes)
-    // pour connaître le nombre maximum de joueurs possibles (kNumPlayers).
-
-    template<typename GameConfig>
-    struct SessionConfig
-    {
-        uint8_t numHumans;
-        uint8_t numAIs;
-        bool autoInitialState;
-        uint32_t numSimulations;
-        float temperature;
-
-        RendererConfig displayConfig;
-
-        void load(const YAML::Node& root)
-        {
-            const auto& node = root["session"];
-
-            // Utilisation directe de GameConfig::kNumPlayers (plus besoin de ITraits)
-            numHumans = loadVal<uint8_t>(node["players"], "numHumans", 0, GameConfig::kNumPlayers);
-
-            // Calcul automatique des IA restantes
-            numAIs = static_cast<uint8_t>(GameConfig::kNumPlayers - numHumans);
-
-            autoInitialState = loadVal<bool>(node["players"], "autoInitialState", 0, 1);
-
-            numSimulations = loadVal<uint32_t>(node["timeControl"], "numSimulations", 1, UINT32_MAX);
-            temperature = loadVal<float>(node["strategy"], "temperature", 0.0f, 100.0f);
-
-            displayConfig.load(root);
-        }
-    };
-
-    // ============================================================================
-    // 5. CONFIGURATION TRAINING (Apprentissage)
+    // 3. TRAINING CONFIGURATION 
     // ============================================================================
     struct TrainingConfig
     {
-        uint32_t bufferSize;
-        uint32_t batchSize;
-        float learningRate;
-        uint32_t epochs;
+        uint32_t gamesPerIteration = 0;
+        uint32_t epochs = 0;
+        uint32_t batchSize = 0;
+        float learningRate = 0.0f;
+        float weightDecay = 0.0f;
+        float valueLossWeight = 0.0f;
 
-        void load(const YAML::Node& root)
+        void load(const YAML::Node& root, const std::string& runMode)
         {
             const auto& node = root["training"];
 
-            bufferSize = loadVal<uint32_t>(node, "bufferSize", 1, UINT32_MAX);
-            batchSize = loadVal<uint32_t>(node, "batchSize", 1, UINT32_MAX);
-            learningRate = loadVal<float>(node, "learningRate", 0.000001f, 1.0f);
-            epochs = loadVal<uint32_t>(node, "epochs", 1, UINT32_MAX);
+            if (!node) {
+                if (runMode == "train")
+                    throw std::runtime_error("Config Error: Missing 'training' block (Mandatory for training).");
+                return; // Ignoré proprement en mode play
+            }
+
+            gamesPerIteration = loadVal<uint32_t>(node, "gamesPerIteration", 1u, UINT32_MAX);
+            epochs = loadVal<uint32_t>(node, "epochs", 1u, 10000u);
+            batchSize = loadVal<uint32_t>(node, "batchSize", 1u, 8192u);
+            learningRate = loadVal<float>(node, "learningRate", 0.0000001f, 1.0f);
+            weightDecay = loadVal<float>(node, "weightDecay", 0.0f, 1.0f);
+            valueLossWeight = loadVal<float>(node, "valueLossWeight", 0.0f, 10.0f);
+        }
+    };
+
+    // ============================================================================
+    // 4. BACKEND CONFIGURATION 
+    // ============================================================================
+    struct BackendConfig
+    {
+        uint32_t numGPUs;
+        uint32_t maxBatchSize;
+        uint32_t numParallelGames;
+        std::string precision;
+        uint32_t numSearchThreads;
+        uint32_t numBackpropThreads;
+        uint32_t numInferenceThreads;
+        float queueScale;
+        bool fastDrain;
+
+        void load(const YAML::Node& root, const std::string& /*runMode*/)
+        {
+            const auto& node = root["backend"];
+            if (!node) throw std::runtime_error("Config Error: Missing 'backend' block (Always mandatory).");
+
+            int cudaCount = 0;
+            cudaError_t err = cudaGetDeviceCount(&cudaCount);
+            uint32_t availableGPUs = (err == cudaSuccess && cudaCount > 0) ? static_cast<uint32_t>(cudaCount) : 1u;
+
+            try {
+                if (node["numGPUs"]) {
+                    std::string val = node["numGPUs"].as<std::string>();
+                    if (val == "auto") numGPUs = availableGPUs;
+                    else {
+                        uint32_t cfg = std::stoi(val);
+                        numGPUs = (cfg == 0 || cfg > availableGPUs) ? availableGPUs : cfg;
+                    }
+                }
+                else {
+                    numGPUs = availableGPUs;
+                }
+            }
+            catch (...) { numGPUs = availableGPUs; }
+
+            maxBatchSize = loadVal<uint32_t>(node, "maxBatchSize", 1u, UINT32_MAX);
+            numParallelGames = loadVal<uint32_t>(node, "numParallelGames", 1u, UINT32_MAX);
+
+            if (node["precision"]) precision = node["precision"].as<std::string>();
+            else precision = "fp16";
+
+            numSearchThreads = loadVal<uint32_t>(node, "numSearchThreads", 1u, 1024u);
+            numBackpropThreads = loadVal<uint32_t>(node, "numBackpropThreads", 1u, 1024u);
+            numInferenceThreads = loadVal<uint32_t>(node, "numInferenceThreads", 1u, 1024u);
+            queueScale = loadVal<float>(node, "queueScale", 1.0f, 100.0f);
+            fastDrain = loadVal<bool>(node, "fastDrain", false, true);
+        }
+    };
+
+    // ============================================================================
+    // 5. SESSION CONFIGURATION 
+    // ============================================================================
+    template<typename GameConfig>
+    struct SessionConfig
+    {
+        uint32_t numAIs = 0;
+        bool autoInitialState = false;
+        float maxTimePerMove = 0.0f;
+        float temperature = 0.0f;
+        bool verbose = false;
+
+        bool renderState = false;
+        bool renderValidActions = false;
+        bool renderActionPlayed = false;
+        bool renderResult = false;
+
+        void load(const YAML::Node& root, const std::string& runMode)
+        {
+            const auto& node = root["session"];
+
+            if (!node) {
+                if (runMode == "play")
+                    throw std::runtime_error("Config Error: Missing 'session' block (Mandatory for match play).");
+                return; // Ignoré proprement en training
+            }
+
+            numAIs = loadVal<uint32_t>(node, "numAIs", 0u, GameConfig::kNumPlayers);
+            autoInitialState = loadVal<bool>(node, "autoInitialState", false, true);
+            maxTimePerMove = loadVal<float>(node, "maxTimePerMove", 0.0f, 10000.0f);
+            temperature = loadVal<float>(node, "temperature", 0.0f, 100.0f);
+            verbose = loadVal<bool>(node, "verbose", false, true);
+
+            renderState = loadVal<bool>(node, "renderState", false, true);
+            renderValidActions = loadVal<bool>(node, "renderValidActions", false, true);
+            renderActionPlayed = loadVal<bool>(node, "renderActionPlayed", false, true);
+            renderResult = loadVal<bool>(node, "renderResult", false, true);
         }
     };
 }

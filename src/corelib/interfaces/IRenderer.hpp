@@ -32,7 +32,7 @@ namespace Core
         USING_GAME_TYPES(GT);
 
     protected:
-        RendererConfig m_baseConfig;
+        SessionConfig<GT> m_baseConfig;
 
         virtual void specificSetup(const YAML::Node& config) = 0;
 
@@ -43,9 +43,10 @@ namespace Core
         // SETUP
         // -------------------------------------------------------------------
 
-        void setup(const YAML::Node& config)
+        void setup(const YAML::Node& config,
+            const SessionConfig<GT>& sessionConfig)
         {
-            m_baseConfig.load(config);
+            m_baseConfig = sessionConfig;
             specificSetup(config);
         }
 

@@ -35,8 +35,8 @@ namespace Chess
     {
         std::cout << "ChessRenderer setup called\n";
 
-        m_renderRawState = Core::loadVal<bool>(config["specific"]["render"], "renderRawState", 0, 1);
-        m_replaceRendering = Core::loadVal<bool>(config["specific"]["render"], "replaceRendering", 0, 1);
+        m_renderRawState = Core::loadVal<bool>(config["specific"]["render"], "renderRawState", false, true);
+        m_replaceRendering = Core::loadVal<bool>(config["specific"]["render"], "replaceRendering", false, true);
     }
 
     void ChessRenderer::renderFactState(const State& state) const
@@ -76,8 +76,8 @@ namespace Chess
             }
 
             std::cout << "Status: " << (fact.exists() ? "Alive" : "Dead")
-                                    << " (Value: " << fact.value() << ")\n";
-			std::cout << "-------------------------\n";
+                << " (Value: " << fact.value() << ")\n";
+            std::cout << "-------------------------\n";
         }
         std::cout << std::endl;
     }
@@ -140,8 +140,8 @@ namespace Chess
                     else if (owner == BLACK) std::cout << "\033[38;5;16m";  // Noir
                 }
 
-                // Symbole
-                std::cout << "\u00A0" << kPiecesSymbol[code] << "\u00A0" << "\033[0m";
+                // CORRECTION : Remplacement des \u00A0 par des espaces standard (" ")
+                std::cout << " " << kPiecesSymbol[code] << " " << "\033[0m";
             }
             std::cout << " " << (rank + 1) << std::endl;
         }

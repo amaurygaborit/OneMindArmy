@@ -1,11 +1,4 @@
 #pragma once
-#include "../corelib/model/GameTypes.hpp"
-
-namespace Core
-{
-    template<ValidGameTraits GT> class InferenceHandler;
-    template<ValidGameTraits GT> class TrainingHandler;
-}
 
 namespace Chess
 {
@@ -19,7 +12,7 @@ namespace Chess
         // ========================================================================
         // CONSTANTES OBLIGATOIRES (Concept ValidGameTraits)
         // ========================================================================
-
+        
 		// 6 types de pièces
         static constexpr uint32_t kNumElemTypes = 6;
 
@@ -43,6 +36,9 @@ namespace Chess
         // Max valid actions for any given position
         static constexpr uint32_t kMaxValidActions = 218;
 
+        // Action history size
+        static constexpr uint32_t kMaxHistory = 8;
+
         // Action space for the neural network (8x8 x 73 plans)
         static constexpr uint32_t kActionSpace = 4672;
 
@@ -50,8 +46,7 @@ namespace Chess
         using Engine = ChessEngine;
         using Requester = ChessRequester;
         using Renderer = ChessRenderer;
-        //using Handler = UCIHandler;
-        using Handler = Core::InferenceHandler<ChessTypes>;
+        using Handler = UCIHandler;
     };
 
     enum Piece : uint32_t

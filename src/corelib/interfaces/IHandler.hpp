@@ -49,7 +49,8 @@ namespace Core
         std::unique_ptr<ThreadPool<GT>>      m_threadPool;
         std::unique_ptr<IRequester<GT>>      m_requester;
         std::unique_ptr<IRenderer<GT>>       m_renderer;
-        SessionConfig<GT>                    m_baseConfig;
+        SessionConfig<GT>                    m_sessionCfg;
+        EngineConfig                         m_engineCfg;
 
         // Override to read handler-specific YAML fields (e.g. numSimulations,
         // temperature schedule, draw detection horizon…).
@@ -82,7 +83,8 @@ namespace Core
             std::unique_ptr<ThreadPool<GT>>&& threadPool,
             std::unique_ptr<IRequester<GT>>&& requester,
             std::unique_ptr<IRenderer<GT>>&& renderer,
-            const SessionConfig<GT>& sessionConfig)
+            const SessionConfig<GT>& sessionCfg,
+            const EngineConfig& engineCfg)
         {
             m_engine = std::move(engine);
             m_treeSearch = std::move(treeSearch);
@@ -90,7 +92,8 @@ namespace Core
             m_requester = std::move(requester);
             m_renderer = std::move(renderer);
 
-            m_baseConfig = sessionConfig;
+            m_sessionCfg = sessionCfg;
+            m_engineCfg = engineCfg;
 
             specificSetup(config);
         }

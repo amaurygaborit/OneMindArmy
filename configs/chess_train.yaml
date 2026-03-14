@@ -1,0 +1,54 @@
+# ==============================================================================
+# ONE MIND ARMY - TRAINING CONFIGURATION
+# Game: Chess | Mode: Self-Play for training
+# Description: Optimized for massive parallel generation on Cloud/Heavy GPUs.
+# ==============================================================================
+name: "chess"
+
+# --- 1. NETWORK ARCHITECTURE (Shared) ---
+network:
+  dModel: 256
+  nHeads: 16
+  nLayers: 8
+  dimFeedforward: 512
+  weightDecay: 0.0001
+
+# --- 2. TRAINING ENGINE (Exploration Mode) ---
+engine:
+  numSimulations: 800      # Fast passes for mass generation
+  maxDepth: 128
+
+  cPUCT: 1.5
+  dirichletAlpha: 0.3      # EXPLORATION ON
+  dirichletEpsilon: 0.25   # EXPLORATION ON
+  temperatureDrop: 30      # Shift to exploitation mid-game
+  virtualLoss: 0.0
+
+  maxNodes: 1000
+  memoryThreshold: 0.90
+  reuseTree: false
+
+# --- 3. TRAINING LOOP (PyTorch) ---
+training:
+  gamesPerIteration: 5000
+  epochs: 2
+  batchSize: 512
+  learningRate: 0.001
+  weightDecay: 0.0001
+  valueLossWeight: 1.0
+
+# --- 4. CLOUD BACKEND (Massive Parallelism) ---
+backend:
+  numGPUs: "auto"
+
+  maxBatchSize: 1024       # Huge TensorRT batch size
+  numParallelGames: 4096   # Fill the 24GB VRAM
+
+  precision: "fp16"
+
+  numSearchThreads: 10
+  numBackpropThreads: 4
+  numInferenceThreads: 1
+
+  queueScale: 3.0
+  fastDrain: true

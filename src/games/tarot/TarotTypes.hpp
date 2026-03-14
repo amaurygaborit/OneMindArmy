@@ -1,11 +1,5 @@
 ﻿#pragma once
 
-namespace Core
-{
-    template<typename GT> class InferenceHandler;
-    template<typename GT> class TrainingHandler;
-}
-
 namespace Tarot
 {
     class TarotEngine;
@@ -14,17 +8,17 @@ namespace Tarot
 
     struct TarotTypes
     {
+        static constexpr uint32_t kNumPlayers = 4;
+        static constexpr uint32_t kNumElems = 78;
+        static constexpr uint32_t kNumMeta = 4;
+        static constexpr uint32_t kNumPos = 8;
+        static constexpr uint32_t kMaxValidActions = 4;
+        static constexpr uint32_t kMaxHistory = 8;
+        static constexpr uint32_t kActionSpace = 666;
+
         using GameTypes = TarotTypes;
         using Engine = TarotEngine;
         using Requester = TarotRequester;
         using Renderer = TarotRenderer;
-
-        static constexpr bool kUseProbabilisticLocation = true;
-        static constexpr size_t kNumPlayers = 4;
-        static constexpr size_t kNumElems = 78;
-        static constexpr size_t kNumMeta = 4;
-        static constexpr size_t kNumPos = 8;
-        static constexpr size_t kMaxValidActions = 4;
-        static constexpr size_t kActionSpace = 666;
     };
 }

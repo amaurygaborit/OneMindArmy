@@ -219,38 +219,10 @@ namespace Chess
                 map nonZeroY = (y | (map)(-(int64_t)y)) >> 63;
                 map exactlyOne = nonZeroX & (nonZeroY ^ 1ULL);
 
-                /*
-                // Debug variables
-                std::cout << "sq: " << sq << std::endl;
-                std::cout << "Idx: " << kingSq * 64 + sq << std::endl;
-                ///
-                std::cout << "between: " << std::endl;
-                dispBoard(between);
-                ///
-                std::cout << "x: " << std::endl;
-                dispBoard(x);
-                std::cout << "nonZero: " << std::endl;
-                dispBoard(nonZero);
-                std::cout << "zeroFriendly: " << std::endl;
-                dispBoard(zeroFriendly);
-                std::cout << "mask0: " << std::endl;
-                dispBoard(mask0);
-                std::cout << "exactlyOne: " << std::endl;
-                dispBoard(exactlyOne);
-                */
-
                 int xIdx = popLSB(x);
                 int pinnerIdx = sq * (int)exactlyOne - (1 - (int)exactlyOne);
                 pinnerOf[xIdx] = pinnerIdx;
-
-                /*
-                // Debug variables
-                std::cout << "xIdx: " << xIdx << std::endl;
-                std::cout << "pinnerIdx: " << pinnerIdx << std::endl;
-                std::cout << "pinnerOf[xIdx]: " << pinnerOf[xIdx] << std::endl;
-                */
             }
-
         }
 
         // Récupère le rayon de pin entre roi et pièce
