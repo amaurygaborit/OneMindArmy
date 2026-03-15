@@ -9,7 +9,7 @@ namespace Core
     class GenericZobrist
     {
     private:
-        using Defs = GameDefs<GT>;
+        using Defs = Core::GameDefs<GT>;
 
         static constexpr uint32_t kNumOwnersAlloc = Defs::kNumPlayers + 1;
         static constexpr uint32_t kNumFactsAlloc = Defs::kNumFactTypes + 1;

@@ -8,7 +8,7 @@
 namespace Core
 {
     // ============================================================================
-    // POV UTILS — Point of View Transformation Toolkit
+    // POV UTILS ï¿½ Point of View Transformation Toolkit
     //
     // A high-performance, stateless utility class to apply Point-of-View (POV) 
     // transformations to Facts and Actions. Operations are strictly in-place and 
@@ -20,10 +20,10 @@ namespace Core
     class PovUtils
     {
     private:
-        using Defs = GameDefs<GT>;
-        using State = State<GT>;
-        using Fact = Fact<GT>;
-        using Action = Action<GT>;
+        using Defs = Core::GameDefs<GT>;
+        using State = Core::State<GT>;
+        using Fact = Core::Fact<GT>;
+        using Action = Core::Action<GT>;
 
         // ========================================================================
         // PRIVATE HELPERS

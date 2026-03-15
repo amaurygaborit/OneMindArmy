@@ -278,7 +278,7 @@ namespace Core
         using Defs = GameDefs<GT>;
         using FId = typename Defs::FId;
         using OId = typename Defs::OId;
-        using FactType = Defs::FactType;
+        using FactType = typename Defs::FactType;
 
     protected:
         float    m_value = 0.0f;
@@ -313,7 +313,7 @@ namespace Core
         using OId = typename Defs::OId;
         using PId = typename Defs::PId;
         using LocType = typename Defs::LocType;
-        using FactType = Defs::FactType;
+        using FactType = typename Defs::FactType;
 
     private:
         LocType m_location{};   // Universal spatial mask
@@ -438,7 +438,7 @@ namespace Core
         using FId = typename Defs::FId;
         using OId = typename Defs::OId;
         using PId = typename Defs::PId;
-        using FactType = Defs::FactType;
+        using FactType = typename Defs::FactType;
 
     private:
         PId m_source = static_cast<PId>(Defs::kNoPos);
@@ -497,10 +497,10 @@ namespace Core
     {
     private:
         uint64_t& m_stateHash;
-        Fact<GT>& m_fact;
+        Core::Fact<GT>& m_fact;
 
     public:
-        FactMutator(uint64_t& hashRef, Fact<GT>& f) noexcept
+        FactMutator(uint64_t& hashRef, Core::Fact<GT>& f) noexcept
             : m_stateHash(hashRef), m_fact(f)
         {
             m_stateHash ^= Core::GenericZobrist<GT>::getKey(m_fact);
@@ -514,7 +514,7 @@ namespace Core
         FactMutator(const FactMutator&) = delete;
         FactMutator& operator=(const FactMutator&) = delete;
 
-        Fact<GT>* operator->() noexcept { return &m_fact; }
+        Core::Fact<GT>* operator->() noexcept { return &m_fact; }
     };
 
     // ========================================================================
@@ -526,19 +526,19 @@ namespace Core
     {
     public:
         using Defs = GameDefs<GT>;
-        using Fact = Fact<GT>;
-        using FactType = Defs::FactType;
+        using FactType = typename Defs::FactType;
 
     private:
-        std::array<Fact, Defs::kMaxFacts> m_facts;
+        // By explicitly using Core::Fact<GT>, we avoid the shadowed name resolution warning.
+        std::array<Core::Fact<GT>, Defs::kMaxFacts> m_facts;
         uint64_t m_hash = 0;
 
         // ====================================================================
-        // SECTEUR SÉCURISÉ : Réservé exclusivement à PovUtils
+        // SECURE SECTOR : Strictly reserved for PovUtils access
         // ====================================================================
         friend class PovUtils<GT>;
 
-        [[nodiscard]] Fact& modifyFactNoHash(uint32_t factIdx) noexcept
+        [[nodiscard]] Core::Fact<GT>& modifyFactNoHash(uint32_t factIdx) noexcept
         {
             assert(factIdx < Defs::kMaxFacts);
             return m_facts[factIdx];
@@ -559,23 +559,23 @@ namespace Core
 
         // --- Read-Only Views ---
         [[nodiscard]] constexpr uint64_t hash() const noexcept { return m_hash; }
-        [[nodiscard]] std::span<const Fact> all() const noexcept { return m_facts; }
-        [[nodiscard]] std::span<const Fact> elems() const noexcept { return std::span{ m_facts }.first(Defs::kMaxElems); }
-        [[nodiscard]] std::span<const Fact> metas() const noexcept { return std::span{ m_facts }.subspan(Defs::kMaxElems, Defs::kMaxMetas); }
+        [[nodiscard]] std::span<const Core::Fact<GT>> all() const noexcept { return m_facts; }
+        [[nodiscard]] std::span<const Core::Fact<GT>> elems() const noexcept { return std::span<const Core::Fact<GT>>{ m_facts }.first(Defs::kMaxElems); }
+        [[nodiscard]] std::span<const Core::Fact<GT>> metas() const noexcept { return std::span<const Core::Fact<GT>>{ m_facts }.subspan(Defs::kMaxElems, Defs::kMaxMetas); }
 
-        [[nodiscard]] const Fact& getElem(uint32_t elemIdx) const noexcept
+        [[nodiscard]] const Core::Fact<GT>& getElem(uint32_t elemIdx) const noexcept
         {
             assert(elemIdx < Defs::kMaxElems);
             return m_facts[elemIdx];
         }
 
-        [[nodiscard]] const Fact& getMeta(uint32_t metaIdx) const noexcept
+        [[nodiscard]] const Core::Fact<GT>& getMeta(uint32_t metaIdx) const noexcept
         {
             assert(metaIdx < Defs::kMaxMetas);
             return m_facts[Defs::kMaxElems + metaIdx];
         }
 
-        [[nodiscard]] const Fact& getFact(uint32_t factIdx) const noexcept
+        [[nodiscard]] const Core::Fact<GT>& getFact(uint32_t factIdx) const noexcept
         {
             assert(factIdx < Defs::kMaxFacts);
             return m_facts[factIdx];
@@ -612,19 +612,19 @@ namespace Core
     };
 
     // ========================================================================
-    // GAME RESULT — Stocke les scores et la cause de fin de partie
+    // GAME RESULT — Stores scores and the reason for game termination
     // ========================================================================
     template<uint32_t NumPlayers>
     struct GameResult
     {
         std::array<float, NumPlayers> scores{};
-        uint8_t reason = 0; // Code spécifique au jeu (0 = aucune/en cours)
+        uint8_t reason = 0; // Game-specific termination code (0 = ongoing/none)
 
-        // Surcharge pour que le MCTS puisse lire/écrire comme dans un tableau !
+        // Overload to allow MCTS to read/write identically to an array
         [[nodiscard]] constexpr float operator[](size_t i) const noexcept { return scores[i]; }
         constexpr float& operator[](size_t i) noexcept { return scores[i]; }
 
-        // Maintien de la compatibilité avec l'API std::array utilisée par Event::reset()
+        // Maintains compatibility with std::array API used by Event::reset()
         constexpr void fill(float val) noexcept {
             scores.fill(val);
             reason = 0;
@@ -659,10 +659,10 @@ namespace Core
     // DEBUG & LOGGING
     // ========================================================================
     template<ValidGameTraits GT>
-    inline std::ostream& operator<<(std::ostream& os, const Fact<GT>& f)
+    inline std::ostream& operator<<(std::ostream& os, const Core::Fact<GT>& f)
     {
         using Defs = GameDefs<GT>;
-        using FactType = Defs::FactType;
+        using FactType = typename Defs::FactType;
 
         os << "[Fact] "
             << (f.type() == FactType::ELEMENT ? "ELEM" : "META")
@@ -686,21 +686,26 @@ namespace Core
 
 #include "../util/Zobrist.hpp"
 
-#define USING_GAME_TYPES(GT)                                        \
-    using Defs          = Core::GameDefs<GT>;                       \
-    using Fact          = Core::Fact<GT>;                           \
-    using State         = Core::State<GT>;                          \
-    using Action        = Core::Action<GT>;                         \
-    using ActionList    = Core::StaticVec<Action, Defs::kMaxValidActions>; \
-    using GameResult    = Core::GameResult<Defs::kNumPlayers>;      \
-    template<typename T>                                            \
-    using Vec           = Core::AlignedVec<T>;                      \
-                                                                    \
-    using ZobristHasher = Core::GenericZobrist<GT>;                 \
-    using PovUtils      = Core::PovUtils<GT>;                       \
-                                                                    \
-    using FId           = typename Defs::FId;                       \
-    using OId           = typename Defs::OId;                       \
-    using PId           = typename Defs::PId;                       \
-    using LocType       = typename Defs::LocType;                   \
-    using FactType      = typename Defs::FactType
+// ============================================================================
+// INJECTION MACRO
+// Ensures downstream classes can pull core definitions into their local scope
+// without constant namespace typing.
+// ============================================================================
+#define USING_GAME_TYPES(GT)                                                   \
+    using Defs          = Core::GameDefs<GT>;                                  \
+    using Fact          = Core::Fact<GT>;                                      \
+    using State         = Core::State<GT>;                                     \
+    using Action        = Core::Action<GT>;                                    \
+    using ActionList    = Core::StaticVec<Core::Action<GT>, Defs::kMaxValidActions>; \
+    using GameResult    = Core::GameResult<Defs::kNumPlayers>;                 \
+    template<typename T>                                                       \
+    using Vec           = Core::AlignedVec<T>;                                 \
+                                                                               \
+    using ZobristHasher = Core::GenericZobrist<GT>;                            \
+    using PovUtils      = Core::PovUtils<GT>;                                  \
+                                                                               \
+    using FId           = typename Defs::FId;                                  \
+    using OId           = typename Defs::OId;                                  \
+    using PId           = typename Defs::PId;                                  \
+    using LocType       = typename Defs::LocType;                              \
+    using FactType      = typename Defs::FactType;

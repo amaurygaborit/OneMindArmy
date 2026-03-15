@@ -1,12 +1,5 @@
 ﻿#pragma once
-#if defined(_MSC_VER)
-// Pour Windows (Visual Studio)
-#include <intrin.h>
-#else
-// Pour Linux (GCC/Clang)
-#include <x86intrin.h>
-#include <immintrin.h>
-#endif
+#include <bit>
 
 #include "ChessTypes.hpp"
 #include "Tables.hpp"
@@ -27,14 +20,13 @@ namespace Chess
     static constexpr map RANK_5 = 0x000000FF00000000ULL;
 
     static ALWAYS_INLINE
-        int popLSB(uint64_t& bb) noexcept
+    int popLSB(uint64_t& bb) noexcept
     {
         if (bb == 0) return 0;
 
-        unsigned long idx;
-        _BitScanForward64(&idx, bb);
+        int idx = std::countr_zero(bb); 
         bb &= bb - 1;
-        return static_cast<int>(idx);
+        return idx;
     }
 
     // renvoie 0 si x==0, sinon 0xFFFF'FFFF'FFFF'FFFF
