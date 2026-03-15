@@ -118,7 +118,7 @@ class OneMindArmyPipeline:
         ]
         self.run_command(cmd, f"Self-Play Generation (Model: {model_name})")
 
-    def enforce_sliding_window(self, max_iterations_to_keep: int = 5):
+    def enforce_sliding_window(self, max_iterations_to_keep: int = 20):
         """
         Conserve exactement les X dernières itérations.
         MÉTHODE TOTALEMENT GAME-AGNOSTIC : On traque les ajouts réels à chaque cycle.
@@ -208,7 +208,7 @@ class OneMindArmyPipeline:
             self.wait_for_vram_cleanup()
 
             # 1.5 Sliding Window (Python - Agnostique et Sûr)
-            self.enforce_sliding_window(max_iterations_to_keep=5)
+            self.enforce_sliding_window(max_iterations_to_keep=20)
 
             # 2. Entraînement (Python / PyTorch)
             self.phase_train()

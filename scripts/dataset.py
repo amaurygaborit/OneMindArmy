@@ -7,7 +7,7 @@ from torch.utils.data import Dataset
 class OneMindArmyDataset(Dataset):
     """
     Highly optimized PyTorch Dataset for loading OneMindArmy binary streams.
-    Implements 'Lazy Initialization' to prevent RAM explosions with num_workers > 0 on Windows.
+    Implements 'Lazy Initialization' to prevent RAM explosions with num_workers > 0 on Windows/Linux.
     Safely ignores incomplete trailing bytes caused by abrupt C++ termination.
     """
     def __init__(self, bin_path: str):
@@ -30,14 +30,16 @@ class OneMindArmyDataset(Dataset):
         self.nn_input_size = self.meta["nnInputSize"]
         self.cpp_struct_size = self.meta.get("sizeofTrainingSample", None)
 
-        # 2. Define the strict Binary Layout
+        # 2. Define the strict Binary Layout (Matching C++ struct exactly)
         data_fields = [
             ('nn_input', np.float32, (self.nn_input_size,)),
             ('policy', np.float32, (self.action_space,)),
+            ('legal_mask', np.float32, (self.action_space,)), # NOUVEAU: Le masque des coups légaux
             ('result', np.float32, (self.num_players,))
         ]
         
-        data_size_bytes = (self.nn_input_size + self.action_space + self.num_players) * 4
+        # Calcul de la taille théorique (en octets, float32 = 4 octets)
+        data_size_bytes = (self.nn_input_size + (self.action_space * 2) + self.num_players) * 4
 
         # 3. Absorb C++ Padding
         if self.cpp_struct_size and self.cpp_struct_size > data_size_bytes:
@@ -66,7 +68,6 @@ class OneMindArmyDataset(Dataset):
         # 5. OPEN ON FIRST READ (Worker Context)
         # This ensures each PyTorch worker opens its own lightweight file handle.
         if self.data is None:
-            # --- LE FIX EST ICI ---
             # En forçant la 'shape', Numpy ignorera les octets corrompus à la fin du fichier.
             self.data = np.memmap(
                 self.bin_path, 
@@ -80,6 +81,7 @@ class OneMindArmyDataset(Dataset):
         # np.copy is required to transfer data from the read-only mmap to writable PyTorch tensors
         state_tensor  = torch.from_numpy(np.copy(sample['nn_input']))
         policy_tensor = torch.from_numpy(np.copy(sample['policy']))
+        mask_tensor   = torch.from_numpy(np.copy(sample['legal_mask'])) # Extraction du masque
         result_tensor = torch.from_numpy(np.copy(sample['result']))
 
-        return state_tensor, policy_tensor, result_tensor
+        return state_tensor, policy_tensor, mask_tensor, result_tensor

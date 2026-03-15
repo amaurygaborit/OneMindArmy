@@ -7,10 +7,10 @@ name: "chess"
 
 # --- 1. NETWORK ARCHITECTURE (Shared) ---
 network:
-  dModel: 256
+  dModel: 512
   nHeads: 16
-  nLayers: 8
-  dimFeedforward: 512
+  nLayers: 12
+  dimFeedforward: 1024
   weightDecay: 0.0001
 
 # --- 2. TRAINING ENGINE (Exploration Mode) ---
@@ -31,8 +31,8 @@ engine:
 # --- 3. TRAINING LOOP (PyTorch) ---
 training:
   gamesPerIteration: 5000
-  epochs: 2
-  batchSize: 512
+  epochs: 1
+  batchSize: 2048
   learningRate: 0.001
   weightDecay: 0.0001
   valueLossWeight: 1.0
@@ -41,14 +41,14 @@ training:
 backend:
   numGPUs: "auto"
 
-  maxBatchSize: 1024       # Huge TensorRT batch size
-  numParallelGames: 4096   # Fill the 24GB VRAM
+  maxBatchSize: 1024
+  numParallelGames: 3072
 
   precision: "fp16"
 
-  numSearchThreads: 10
-  numBackpropThreads: 4
-  numInferenceThreads: 1
+  numSearchThreads: 22
+  numBackpropThreads: 7
+  numInferenceThreads: 2
 
   queueScale: 3.0
   fastDrain: true

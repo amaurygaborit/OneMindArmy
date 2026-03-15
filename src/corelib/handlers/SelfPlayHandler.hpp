@@ -140,7 +140,11 @@ namespace Core
                     }
 
                     auto encodedInput = StateEncoder<GT>::encode(povState, povHistory);
-                    g.replayBuffer.recordTurn(encodedInput, activeTree->getRootPolicy());
+                    g.replayBuffer.recordTurn(
+                        encodedInput,
+                        activeTree->getRootPolicy(),
+                        activeTree->getRootLegalMovesMask()
+                    );
 
                     // 2. Play Move
                     g.turnCount++;

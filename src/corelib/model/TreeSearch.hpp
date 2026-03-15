@@ -525,6 +525,28 @@ namespace Core
             return pol;
         }
 
+        [[nodiscard]] std::array<float, Defs::kActionSpace> getRootLegalMovesMask() const {
+            std::array<float, Defs::kActionSpace> mask{};
+            mask.fill(0.0f);
+
+            if (m_rootIdx == UINT32_MAX) return mask;
+
+            uint32_t num = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
+            if (num == 0) return mask;
+
+            uint32_t start = m_nodeFirstChild[m_rootIdx];
+
+            for (uint32_t i = 0; i < num; ++i) {
+                // On récupère l'ID de l'action de chaque enfant du noeud racine
+                uint32_t actionId = m_engine->actionToIdx(m_nodeAction[start + i]);
+
+                if (actionId < Defs::kActionSpace) {
+                    mask[actionId] = 1.0f; // C'est un coup légal !
+                }
+            }
+            return mask;
+        }
+
         [[nodiscard]] float getMemoryUsage() const {
             return static_cast<float>(m_nodeCount.load(std::memory_order_relaxed)) / static_cast<float>(m_config.maxNodes);
         }

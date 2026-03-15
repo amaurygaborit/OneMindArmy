@@ -1,4 +1,5 @@
 import os
+from pyexpat import model
 import sys
 import yaml
 import json
@@ -222,13 +223,18 @@ def run_training(config_path: str):
         for batch_idx, (states, target_policies, target_results) in enumerate(dataloader):
             states = states.to(device, non_blocking=True)
             target_policies = target_policies.to(device, non_blocking=True)
+            legal_masks = legal_masks.to(device, non_blocking=True)
             target_results = target_results.to(device, non_blocking=True)
 
             # Normalization (Strict)
             target_policies = target_policies / (target_policies.sum(dim=-1, keepdim=True) + 1e-9)
             
             # Forward
-            pred_log_probs, pred_values = model(states)
+            policy_logits, pred_values = model(states)
+
+            bool_mask = (legal_masks < 0.5) 
+            policy_logits = policy_logits.masked_fill(bool_mask, -1e9)
+            pred_log_probs = torch.log_softmax(policy_logits, dim=-1)
 
             # Losses
             v_loss = mse_criterion(pred_values, target_results)

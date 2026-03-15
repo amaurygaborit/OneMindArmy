@@ -26,7 +26,8 @@ namespace Core
 
         std::array<float, Defs::kNNInputSize> nnInput;
         std::array<float, Defs::kActionSpace> policy;
-        std::array<float, Defs::kNumPlayers> result; // Idéalement, n'utilise que des floats ici aussi
+        std::array<float, Defs::kActionSpace> legalMovesMask;
+        std::array<float, Defs::kNumPlayers> result;
     };
 
     #pragma pack(pop) // Remet le compilateur dans son mode normal
@@ -68,18 +69,16 @@ namespace Core
         // and memcpy to eliminate redundant CPU serialization overhead.
         // ------------------------------------------------------------------------
         void recordTurn(const std::array<float, Defs::kNNInputSize>& encodedInput,
-            const std::array<float, Defs::kActionSpace>& policy)
+            const std::array<float, Defs::kActionSpace>& policy,
+            const std::array<float, Defs::kActionSpace>& legalMask)
         {
-            // Emplace directly constructs the object in the pre-allocated buffer
             m_samples.emplace_back();
             auto& sample = m_samples.back();
 
-            // Fast contiguous memory copy directly into the aligned struct
+            // 3 copies mémoires ultra-rapides et c'est plié !
             std::memcpy(sample.nnInput.data(), encodedInput.data(), Defs::kNNInputSize * sizeof(float));
             std::memcpy(sample.policy.data(), policy.data(), Defs::kActionSpace * sizeof(float));
-
-            // Note: `sample.result` remains uninitialized garbage here. 
-            // It will be properly overwritten in flushToFile().
+            std::memcpy(sample.legalMovesMask.data(), legalMask.data(), Defs::kActionSpace * sizeof(float));
         }
 
         // ------------------------------------------------------------------------

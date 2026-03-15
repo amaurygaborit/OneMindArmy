@@ -1,7 +1,0 @@
-{
-  "numPlayers": 2,
-  "numPos": 64,
-  "actionSpace": 4672,
-  "nnInputSize": 3264,
-  "sizeofTrainingSample": 31752
-}
