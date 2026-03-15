@@ -163,14 +163,14 @@ namespace Core
         {
             if (!m_engine) return 1;
 
-            // Retrieve the physical constraints embedded in the engine file
-            nvinfer1::Dims maxDims = m_engine->getProfileDimensions(
-                0, // Input index (0 = "input_state")
-                0, // Profile index (Usually 0 unless using multiple optimization profiles)
+            // On utilise exactement la méthode recommandée par ton compilateur
+            nvinfer1::Dims maxDims = m_engine->getProfileShape(
+                "input_state", // Nom du tenseur d'entrée
+                0,             // Index du profil
                 nvinfer1::OptProfileSelector::kMAX
             );
 
-            // Dimension 0 of the input shape is defined as the Batch Size
+            // La dimension 0 (maxDims.d[0]) représente la taille de batch maximale
             return static_cast<uint32_t>(maxDims.d[0]);
         }
 
