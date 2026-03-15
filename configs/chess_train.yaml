@@ -46,9 +46,9 @@ backend:
 
   precision: "fp16"
 
-  numSearchThreads: 22
+  numSearchThreads: 23
   numBackpropThreads: 7
-  numInferenceThreads: 2
+  numInferenceThreads: 1
 
   queueScale: 3.0
   fastDrain: true
