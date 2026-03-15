@@ -88,13 +88,13 @@ namespace Core
         void loadTensorRTEngine(const std::string& enginePath)
         {
             std::ifstream file(enginePath, std::ios::binary);
-            if (!file.is_open()) { // Check if file actually opened
+            if (!file.is_open()) {
                 throw std::runtime_error("Fatal Error: Could not find or open TensorRT engine file at: " + enginePath);
             }
 
             file.seekg(0, file.end);
             size_t size = file.tellg();
-            if (size == 0) { // Check if file is empty
+            if (size == 0) {
                 throw std::runtime_error("Fatal Error: TensorRT engine file is empty: " + enginePath);
             }
             file.seekg(0, file.beg);
@@ -153,6 +153,25 @@ namespace Core
             if (m_context) delete m_context;
             if (m_engine) delete m_engine;
             if (m_runtime) delete m_runtime;
+        }
+
+        // ====================================================================
+        // NEW: AUTO-DETECTION OF MAX BATCH SIZE
+        // Reads the absolute physical limit compiled into the .plan file
+        // ====================================================================
+        [[nodiscard]] uint32_t getEngineMaxBatchSize() const
+        {
+            if (!m_engine) return 1;
+
+            // Retrieve the physical constraints embedded in the engine file
+            nvinfer1::Dims maxDims = m_engine->getProfileDimensions(
+                0, // Input index (0 = "input_state")
+                0, // Profile index (Usually 0 unless using multiple optimization profiles)
+                nvinfer1::OptProfileSelector::kMAX
+            );
+
+            // Dimension 0 of the input shape is defined as the Batch Size
+            return static_cast<uint32_t>(maxDims.d[0]);
         }
 
         // --------------------------------------------------------------------

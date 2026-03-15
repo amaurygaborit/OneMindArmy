@@ -274,7 +274,7 @@ namespace Core
         // ========================================================================
         // WORKER 2: Inference (GPU Context Binding & Dynamic Batching)
         // ========================================================================
-        void loopInference(size_t gpuIdx, uint32_t maxBatchSize)
+        void loopInference(size_t gpuIdx, uint32_t configBatchSize)
         {
             cudaError_t err = cudaSetDevice(static_cast<int>(gpuIdx));
             if (err != cudaSuccess) {
@@ -282,16 +282,24 @@ namespace Core
                 return;
             }
 
-            AlignedVec<EvalTask> batchTasks(reserve_only, maxBatchSize);
-            AlignedVec<std::array<float, Defs::kNNInputSize>> batchInputs(reserve_only, maxBatchSize);
-            AlignedVec<ModelResults> batchOutputs(reserve_only, maxBatchSize);
-
             auto& net = m_neuralNets[gpuIdx];
+
+            // ----------------------------------------------------------------
+            // AUTO-DÉTECTION : Fini le batch size en dur !
+            // On s'assure que le batch ne dépasse pas ce que le .plan autorise.
+            // ----------------------------------------------------------------
+            uint32_t engineMaxBatch = net->getEngineMaxBatchSize();
+            uint32_t safeBatchSize = std::min(configBatchSize, engineMaxBatch);
+
+            AlignedVec<EvalTask> batchTasks(reserve_only, safeBatchSize);
+            AlignedVec<std::array<float, Defs::kNNInputSize>> batchInputs(reserve_only, safeBatchSize);
+            AlignedVec<ModelResults> batchOutputs(reserve_only, safeBatchSize);
 
             while (m_running)
             {
                 batchTasks.clear();
-                size_t count = m_qEval.pop_batch(batchTasks, maxBatchSize, std::chrono::microseconds(1000));
+                // On utilise safeBatchSize pour le dépilage
+                size_t count = m_qEval.pop_batch(batchTasks, safeBatchSize, std::chrono::microseconds(1000));
                 if (count == 0) continue;
 
                 batchInputs.clear();
