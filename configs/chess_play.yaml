@@ -24,7 +24,7 @@ engine:
 backend:
   numGPUs: 1
 
-  maxBatchSize: 256         # Small batch size for instant TensorRT response
+  inferenceBatchSize: 256         # Small batch size for instant TensorRT response
   numParallelGames: 1
 
   precision: "fp16"

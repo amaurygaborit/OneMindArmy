@@ -180,7 +180,7 @@ namespace Core
 
             for (uint32_t g = 0; g < m_neuralNets.size(); ++g) {
                 for (uint32_t k = 0; k < backendCfg.numInferenceThreads; ++k) {
-                    m_workers.emplace_back(&ThreadPool::loopInference, this, g, backendCfg.maxBatchSize);
+                    m_workers.emplace_back(&ThreadPool::loopInference, this, g, backendCfg.inferenceBatchSize);
                 }
             }
 
@@ -274,6 +274,9 @@ namespace Core
         // ========================================================================
         // WORKER 2: Inference (GPU Context Binding & Dynamic Batching)
         // ========================================================================
+// ========================================================================
+        // WORKER 2: Inference (GPU Context Binding & Dynamic Batching)
+        // ========================================================================
         void loopInference(size_t gpuIdx, uint32_t configBatchSize)
         {
             cudaError_t err = cudaSetDevice(static_cast<int>(gpuIdx));
@@ -284,22 +287,16 @@ namespace Core
 
             auto& net = m_neuralNets[gpuIdx];
 
-            // ----------------------------------------------------------------
-            // AUTO-DÉTECTION : Fini le batch size en dur !
-            // On s'assure que le batch ne dépasse pas ce que le .plan autorise.
-            // ----------------------------------------------------------------
-            uint32_t engineMaxBatch = net->getEngineMaxBatchSize();
-            uint32_t safeBatchSize = std::min(configBatchSize, engineMaxBatch);
-
-            AlignedVec<EvalTask> batchTasks(reserve_only, safeBatchSize);
-            AlignedVec<std::array<float, Defs::kNNInputSize>> batchInputs(reserve_only, safeBatchSize);
-            AlignedVec<ModelResults> batchOutputs(reserve_only, safeBatchSize);
+            AlignedVec<EvalTask> batchTasks(reserve_only, configBatchSize);
+            AlignedVec<std::array<float, Defs::kNNInputSize>> batchInputs(reserve_only, configBatchSize);
+            AlignedVec<ModelResults> batchOutputs(reserve_only, configBatchSize);
 
             while (m_running)
             {
                 batchTasks.clear();
-                // On utilise safeBatchSize pour le dépilage
-                size_t count = m_qEval.pop_batch(batchTasks, safeBatchSize, std::chrono::microseconds(1000));
+
+                // Dépilage classique basé strictement sur la configuration
+                size_t count = m_qEval.pop_batch(batchTasks, configBatchSize, std::chrono::microseconds(1000));
                 if (count == 0) continue;
 
                 batchInputs.clear();

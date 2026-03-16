@@ -24,10 +24,13 @@ namespace Core
     {
         USING_GAME_TYPES(GT);
 
+        static constexpr size_t kMaskBytes = (Defs::kActionSpace + 7) / 8;
+
         std::array<float, Defs::kNNInputSize> nnInput;
         std::array<float, Defs::kActionSpace> policy;
-        std::array<float, Defs::kActionSpace> legalMovesMask;
         std::array<float, Defs::kNumPlayers> result;
+
+        std::array<uint8_t, kMaskBytes> legalMovesMask;
     };
 
     #pragma pack(pop) // Remet le compilateur dans son mode normal
@@ -70,15 +73,20 @@ namespace Core
         // ------------------------------------------------------------------------
         void recordTurn(const std::array<float, Defs::kNNInputSize>& encodedInput,
             const std::array<float, Defs::kActionSpace>& policy,
-            const std::array<float, Defs::kActionSpace>& legalMask)
+            const std::array<bool, Defs::kActionSpace>& legalMaskBool)
         {
             m_samples.emplace_back();
             auto& sample = m_samples.back();
 
-            // 3 copies mémoires ultra-rapides et c'est plié !
             std::memcpy(sample.nnInput.data(), encodedInput.data(), Defs::kNNInputSize * sizeof(float));
             std::memcpy(sample.policy.data(), policy.data(), Defs::kActionSpace * sizeof(float));
-            std::memcpy(sample.legalMovesMask.data(), legalMask.data(), Defs::kActionSpace * sizeof(float));
+
+            std::memset(sample.legalMovesMask.data(), 0, sample.legalMovesMask.size());
+            for (size_t i = 0; i < Defs::kActionSpace; ++i) {
+                if (legalMaskBool[i]) {
+                    sample.legalMovesMask[i / 8] |= (1 << (i % 8));
+                }
+            }
         }
 
         // ------------------------------------------------------------------------

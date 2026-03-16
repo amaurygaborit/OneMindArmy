@@ -9,6 +9,7 @@ import platform
 import subprocess
 import argparse
 import psutil
+import glob
 from pathlib import Path
 
 # ==============================================================================
@@ -58,7 +59,7 @@ class OneMindArmyPipeline:
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
     def run_command(self, cmd_list: list, phase_name: str):
-        """Exécute une commande système. Laisse stdout libre pour les logs en temps réel."""
+        """Exécute une commande système en temps réel."""
         cmd_str = " ".join([str(x) for x in cmd_list])
         logger.info(f"--- STARTING PHASE : {phase_name} ---")
         logger.debug(f"Command: {cmd_str}")
@@ -71,7 +72,7 @@ class OneMindArmyPipeline:
             sys.exit(1)
 
     def wait_for_vram_cleanup(self, timeout_sec: int = 15):
-        """Interroge nvidia-smi pour s'assurer que la VRAM est totalement libérée."""
+        """S'assure que la VRAM est libérée avant la phase suivante."""
         if platform.system() == "Windows" and not shutil.which("nvidia-smi"):
             return 
             
@@ -105,6 +106,92 @@ class OneMindArmyPipeline:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
 
+    def update_config_iteration(self, iteration: int):
+        """Injecte l'itération courante dans le YAML pour que le C++ nomme bien le fichier."""
+        with open(self.config_path, 'r') as f:
+            cfg = yaml.safe_load(f)
+            
+        if "training" not in cfg:
+            cfg["training"] = {}
+        cfg["training"]["currentIteration"] = iteration
+        
+        with open(self.config_path, 'w') as f:
+            yaml.safe_dump(cfg, f, default_flow_style=False, sort_keys=False)
+            
+        # Met à jour la config en RAM
+        self.config = cfg
+
+    def get_start_iteration(self) -> int:
+        """Détecte la dernière itération jouée pour reprendre l'entraînement proprement."""
+        bin_files = sorted(self.data_dir.glob("iteration_*.bin"))
+        if not bin_files:
+            return 1
+        
+        # Extrait "0042" de "iteration_0042.bin"
+        last_file = bin_files[-1].stem
+        try:
+            last_iter = int(last_file.split("_")[1])
+            logger.info(f"[Auto-Resume] Found existing dataset up to iteration {last_iter}.")
+            return last_iter + 1
+        except Exception:
+            return 1
+
+    def enforce_sliding_window(self):
+        """
+        Sliding Window dynamique basée sur le NOMBRE DE SAMPLES.
+        Supprime les fichiers entiers les plus vieux quand la limite est atteinte.
+        """
+        max_samples = self.config.get("training", {}).get("slidingWindowSamples", 2_000_000)
+        meta_path = self.data_dir / f"{self.game_name}_training_data.bin.meta.json"
+        
+        if not meta_path.exists():
+            return
+
+        with open(meta_path, 'r') as f:
+            meta = json.load(f)
+            
+        struct_size = meta.get("sizeofTrainingSample")
+        if not struct_size:
+            logger.warning("[Sliding Window] 'sizeofTrainingSample' missing in meta. Skipping.")
+            return
+
+        # 1. Lister et trier tous les fichiers d'itération du plus vieux au plus récent
+        bin_files = sorted(self.data_dir.glob("iteration_*.bin"))
+        if not bin_files:
+            return
+
+        # 2. Calculer le nombre de samples par fichier
+        file_stats = []
+        total_samples = 0
+        
+        for b_file in bin_files:
+            f_size = b_file.stat().st_size
+            samples = f_size // struct_size
+            file_stats.append((b_file, samples))
+            total_samples += samples
+
+        logger.info(f"[Sliding Window] Current Capacity: {total_samples} / {max_samples} samples.")
+
+        # 3. Supprimer les vieux fichiers si on dépasse la limite
+        files_deleted = 0
+        samples_removed = 0
+        
+        while total_samples > max_samples and len(file_stats) > 1:
+            oldest_file, samples_in_file = file_stats.pop(0)
+            
+            try:
+                os.remove(oldest_file)
+                total_samples -= samples_in_file
+                samples_removed += samples_in_file
+                files_deleted += 1
+                logger.info(f"[Sliding Window] Deleted {oldest_file.name} ({samples_in_file} samples).")
+            except Exception as e:
+                logger.error(f"[Sliding Window] Failed to delete {oldest_file.name}: {e}")
+                break
+
+        if files_deleted > 0:
+            logger.info(f"[Sliding Window] Trimmed {files_deleted} files. New total: {total_samples} samples.")
+
     def phase_bootstrap(self):
         cmd = [sys.executable, "scripts/init_v0.py", "--config", str(self.config_path)]
         self.run_command(cmd, "Bootstrap v0 (Initialization)")
@@ -117,70 +204,6 @@ class OneMindArmyPipeline:
             "--model", model_name
         ]
         self.run_command(cmd, f"Self-Play Generation (Model: {model_name})")
-
-    def enforce_sliding_window(self, max_iterations_to_keep: int = 20):
-        """
-        Conserve exactement les X dernières itérations.
-        MÉTHODE TOTALEMENT GAME-AGNOSTIC : On traque les ajouts réels à chaque cycle.
-        """
-        dataset_path = self.data_dir / f"{self.game_name}_training_data.bin"
-        meta_path = self.data_dir / f"{self.game_name}_training_data.bin.meta.json"
-        window_path = self.data_dir / "sliding_window.json"
-        
-        if not dataset_path.exists() or not meta_path.exists():
-            return
-
-        with open(meta_path, 'r') as f:
-            meta = json.load(f)
-            
-        struct_size = meta.get("sizeofTrainingSample")
-        if not struct_size:
-            logger.warning("[Sliding Window] 'sizeofTrainingSample' missing. Skipping.")
-            return
-
-        # 1. Lire l'historique des itérations
-        window_state = {"iters": []}
-        if window_path.exists():
-            with open(window_path, 'r') as f:
-                window_state = json.load(f)
-
-        # 2. Calculer le nombre exact de samples fraîchement générés
-        file_size = dataset_path.stat().st_size
-        total_samples_now = file_size // struct_size
-        samples_previously_tracked = sum(window_state["iters"])
-        
-        new_samples = total_samples_now - samples_previously_tracked
-        
-        if new_samples > 0:
-            window_state["iters"].append(new_samples)
-            logger.info(f"[Sliding Window] Tracked {new_samples} new samples for this iteration.")
-
-        # 3. Appliquer la coupe si on dépasse le buffer
-        if len(window_state["iters"]) > max_iterations_to_keep:
-            iters_to_remove = len(window_state["iters"]) - max_iterations_to_keep
-            samples_to_remove = sum(window_state["iters"][:iters_to_remove])
-            
-            logger.info(f"[Sliding Window] Max iterations ({max_iterations_to_keep}) exceeded.")
-            logger.info(f"[Sliding Window] Trimming the oldest {iters_to_remove} iteration(s) ({samples_to_remove} samples)...")
-            
-            bytes_to_remove = samples_to_remove * struct_size
-            temp_path = dataset_path.with_suffix('.bin.tmp')
-            
-            # Transfert sécurisé par blocs (Évite la saturation de RAM sur les gros fichiers)
-            with open(dataset_path, 'rb') as f_in, open(temp_path, 'wb') as f_out:
-                f_in.seek(bytes_to_remove)
-                shutil.copyfileobj(f_in, f_out, length=1024*1024*64) # Copie par blocs de 64 Mo
-                
-            # Écrase l'ancien fichier
-            os.replace(temp_path, dataset_path)
-                
-            # Mettre à jour l'état
-            window_state["iters"] = window_state["iters"][iters_to_remove:]
-            logger.info("[Sliding Window] Dataset trimmed successfully (RAM Safe Mode).")
-
-        # 4. Sauvegarder l'état pour la prochaine boucle
-        with open(window_path, 'w') as f:
-            json.dump(window_state, f)
 
     def phase_train(self):
         cmd = [sys.executable, "scripts/train.py", "--config", str(self.config_path)]
@@ -199,16 +222,20 @@ class OneMindArmyPipeline:
             self.wait_for_vram_cleanup()
 
         start_time = time.time()
+        start_iter = self.get_start_iteration()
 
-        for iteration in range(1, total_iterations + 1):
-            logger.info(f"\n{'='*60}\n=== ITERATION {iteration} / {total_iterations} ===\n{'='*60}")
+        for iteration in range(start_iter, start_iter + total_iterations):
+            logger.info(f"\n{'='*60}\n=== ITERATION {iteration} ===\n{'='*60}")
+
+            # 0. Update YAML to inform C++ of the current iteration
+            self.update_config_iteration(iteration)
 
             # 1. Génération de données (C++ / TensorRT)
             self.phase_self_play(best_model_name)
             self.wait_for_vram_cleanup()
 
-            # 1.5 Sliding Window (Python - Agnostique et Sûr)
-            self.enforce_sliding_window(max_iterations_to_keep=20)
+            # 1.5 Sliding Window Dynamique (Basée sur les samples)
+            self.enforce_sliding_window()
 
             # 2. Entraînement (Python / PyTorch)
             self.phase_train()
@@ -223,7 +250,7 @@ class OneMindArmyPipeline:
                 sys.exit(1)
 
         total_hours = (time.time() - start_time) / 3600
-        logger.info(f"=== PIPELINE FINISHED : {total_iterations} ITERATIONS IN {total_hours:.2f} HOURS ===")
+        logger.info(f"=== PIPELINE FINISHED : {total_iterations} ITERATIONS COMPLETED IN {total_hours:.2f} HOURS ===")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="One Mind Army - Orchestrator")

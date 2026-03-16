@@ -94,7 +94,7 @@ namespace Core
                 AlignedVec<std::unique_ptr<NeuralNet<GT>>> neuralNets;
                 neuralNets.reserve(backendConfig.numGPUs);
                 for (uint32_t i = 0; i < backendConfig.numGPUs; ++i) {
-                    neuralNets.push_back(std::make_unique<NeuralNet<GT>>(i, backendConfig.maxBatchSize, modelPath));
+                    neuralNets.push_back(std::make_unique<NeuralNet<GT>>(i, backendConfig.inferenceBatchSize, modelPath));
                 }
 
                 threadPool = std::make_unique<ThreadPool<GT>>(

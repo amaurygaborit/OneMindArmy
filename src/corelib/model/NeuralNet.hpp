@@ -65,7 +65,7 @@ namespace Core
         using ModelResults = ModelResultsT<GT>;
 
         int m_deviceId;
-        uint32_t m_maxBatchSize;
+        uint32_t m_inferenceBatchSize;
         cudaStream_t m_stream;
 
         nvinfer1::IRuntime* m_runtime = nullptr;
@@ -112,8 +112,8 @@ namespace Core
         }
 
     public:
-        NeuralNet(int deviceId, uint32_t maxBatchSize, const std::string& enginePath)
-            : m_deviceId(deviceId), m_maxBatchSize(maxBatchSize)
+        NeuralNet(int deviceId, uint32_t inferenceBatchSize, const std::string& enginePath)
+            : m_deviceId(deviceId), m_inferenceBatchSize(inferenceBatchSize)
         {
             CUDA_CHECK(cudaSetDevice(m_deviceId));
             CUDA_CHECK(cudaStreamCreate(&m_stream));
@@ -121,14 +121,14 @@ namespace Core
             loadTensorRTEngine(enginePath);
 
             // 1. Allocate GPU Memory
-            CUDA_CHECK(cudaMalloc(&d_nnInputBuffer, maxBatchSize * Defs::kNNInputSize * sizeof(float)));
-            CUDA_CHECK(cudaMalloc(&d_nnOutputValues, maxBatchSize * Defs::kNumPlayers * sizeof(float)));
-            CUDA_CHECK(cudaMalloc(&d_nnOutputPolicy, maxBatchSize * Defs::kActionSpace * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&d_nnInputBuffer, inferenceBatchSize * Defs::kNNInputSize * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&d_nnOutputValues, inferenceBatchSize * Defs::kNumPlayers * sizeof(float)));
+            CUDA_CHECK(cudaMalloc(&d_nnOutputPolicy, inferenceBatchSize * Defs::kActionSpace * sizeof(float)));
 
             // 2. Allocate CPU Pinned Memory (Prevents OS paging, allows direct DMA)
-            CUDA_CHECK(cudaMallocHost(&h_nnInputBuffer, maxBatchSize * Defs::kNNInputSize * sizeof(float)));
-            CUDA_CHECK(cudaMallocHost(&h_outputValues, maxBatchSize * Defs::kNumPlayers * sizeof(float)));
-            CUDA_CHECK(cudaMallocHost(&h_outputPolicy, maxBatchSize * Defs::kActionSpace * sizeof(float)));
+            CUDA_CHECK(cudaMallocHost(&h_nnInputBuffer, inferenceBatchSize * Defs::kNNInputSize * sizeof(float)));
+            CUDA_CHECK(cudaMallocHost(&h_outputValues, inferenceBatchSize * Defs::kNumPlayers * sizeof(float)));
+            CUDA_CHECK(cudaMallocHost(&h_outputPolicy, inferenceBatchSize * Defs::kActionSpace * sizeof(float)));
 
             // 3. Bind Tensor Addresses (TensorRT V3 API requirement)
             m_context->setTensorAddress("input_state", d_nnInputBuffer);
@@ -153,25 +153,6 @@ namespace Core
             if (m_context) delete m_context;
             if (m_engine) delete m_engine;
             if (m_runtime) delete m_runtime;
-        }
-
-        // ====================================================================
-        // NEW: AUTO-DETECTION OF MAX BATCH SIZE
-        // Reads the absolute physical limit compiled into the .plan file
-        // ====================================================================
-        [[nodiscard]] uint32_t getEngineMaxBatchSize() const
-        {
-            if (!m_engine) return 1;
-
-            // On utilise exactement la méthode recommandée par ton compilateur
-            nvinfer1::Dims maxDims = m_engine->getProfileShape(
-                "input_state", // Nom du tenseur d'entrée
-                0,             // Index du profil
-                nvinfer1::OptProfileSelector::kMAX
-            );
-
-            // La dimension 0 (maxDims.d[0]) représente la taille de batch maximale
-            return static_cast<uint32_t>(maxDims.d[0]);
         }
 
         // --------------------------------------------------------------------

@@ -113,7 +113,7 @@ namespace Core
     {
         uint32_t gamesPerIteration = 0;
         uint32_t epochs = 0;
-        uint32_t batchSize = 0;
+        uint32_t trainBatchSize = 0;
         float learningRate = 0.0f;
         float weightDecay = 0.0f;
         float valueLossWeight = 0.0f;
@@ -130,7 +130,7 @@ namespace Core
 
             gamesPerIteration = loadVal<uint32_t>(node, "gamesPerIteration", 1u, UINT32_MAX);
             epochs = loadVal<uint32_t>(node, "epochs", 1u, 10000u);
-            batchSize = loadVal<uint32_t>(node, "batchSize", 1u, 8192u);
+            trainBatchSize = loadVal<uint32_t>(node, "trainBatchSize", 1u, 8192u);
             learningRate = loadVal<float>(node, "learningRate", 0.0000001f, 1.0f);
             weightDecay = loadVal<float>(node, "weightDecay", 0.0f, 1.0f);
             valueLossWeight = loadVal<float>(node, "valueLossWeight", 0.0f, 10.0f);
@@ -143,7 +143,7 @@ namespace Core
     struct BackendConfig
     {
         uint32_t numGPUs;
-        uint32_t maxBatchSize;
+        uint32_t inferenceBatchSize;
         uint32_t numParallelGames;
         std::string precision;
         uint32_t numSearchThreads;
@@ -176,7 +176,7 @@ namespace Core
             }
             catch (...) { numGPUs = availableGPUs; }
 
-            maxBatchSize = loadVal<uint32_t>(node, "maxBatchSize", 1u, UINT32_MAX);
+            inferenceBatchSize = loadVal<uint32_t>(node, "inferenceBatchSize", 1u, UINT32_MAX);
             numParallelGames = loadVal<uint32_t>(node, "numParallelGames", 1u, UINT32_MAX);
 
             if (node["precision"]) precision = node["precision"].as<std::string>();

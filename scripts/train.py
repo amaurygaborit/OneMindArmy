@@ -1,16 +1,16 @@
 import os
-from pyexpat import model
 import sys
 import yaml
 import json
 import argparse
 import subprocess
+import glob
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import time
 from pathlib import Path
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, ConcatDataset
 
 # Import local de ton dataset personnalisé
 try:
@@ -59,7 +59,7 @@ class OneMindArmyNet(nn.Module):
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=self.n_layers)
         
-        # Policy Head (Output Logits)
+        # Policy Head (Output Logits bruts, pas de Softmax ici !)
         self.policy_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model),
             nn.ReLU(),
@@ -83,30 +83,50 @@ class OneMindArmyNet(nn.Module):
         # Global Pooling (Mean representation)
         global_repr = x.mean(dim=1)
         
-        # Policy output (Log Softmax for KL Divergence or NLL)
+        # Policy output (Logits bruts pour pouvoir appliquer le masque de coups légaux dans la loss)
         policy_logits = self.policy_head(global_repr)
-        policy_log_probs = torch.log_softmax(policy_logits, dim=-1)
         
         # Value output (Predicted game outcome)
         value_pred = self.value_head(global_repr)
         
-        return policy_log_probs, value_pred
+        return policy_logits, value_pred
 
 
 # ==============================================================================
 # --- 2. EXPORT & COMPILATION PIPELINE ---
 # ==============================================================================
+
+class ONNXExportWrapper(nn.Module):
+    """
+    Coquille spéciale pour l'export. 
+    Transforme les logits bruts en vraies probabilités (Softmax) pour le C++.
+    """
+    def __init__(self, base_model):
+        super().__init__()
+        self.base_model = base_model
+
+    def forward(self, x):
+        policy_logits, value_pred = self.base_model(x)
+        # On applique le Softmax en dur dans le graphe ONNX
+        policy_probs = torch.softmax(policy_logits, dim=-1)
+        return policy_probs, value_pred
+
+
 def export_to_onnx(model, meta, save_path):
     print(f"\n[Export] Saving ONNX model to: {save_path}")
     model.eval()
     
+    # On enveloppe le modèle avec le Softmax
+    export_model = ONNXExportWrapper(model)
+    export_model.eval()
+
     device = next(model.parameters()).device
     dummy_input = torch.randn(1, meta["nnInputSize"]).to(device)
     
     Path(save_path).parent.mkdir(parents=True, exist_ok=True)
 
     torch.onnx.export(
-        model, 
+        export_model, # On exporte le wrapper !
         dummy_input, 
         save_path, 
         export_params=True, 
@@ -126,7 +146,6 @@ def compile_tensorrt_engine(onnx_path, plan_path, meta, opt_batch, precision):
     
     nn_input_size = meta["nnInputSize"]
     
-    # 1. On crée la liste de base avec les arguments obligatoires
     cmd = [
         "trtexec",
         f"--onnx={onnx_path}",
@@ -136,20 +155,15 @@ def compile_tensorrt_engine(onnx_path, plan_path, meta, opt_batch, precision):
         f"--maxShapes=input_state:{opt_batch}x{nn_input_size}"
     ]
     
-    # 2. On ajoute les options conditionnelles uniquement si nécessaire
     if precision.lower() == "fp16":
         cmd.append("--fp16")
     
-    # Si tu veux le mode verbose pour débugger l'erreur actuelle, décommente ceci :
-    # cmd.append("--verbose")
-    
     try:
-        # On utilise stderr=subprocess.PIPE pour capturer les erreurs détaillées de NVIDIA
         result = subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, encoding='utf-8')
         print(f"[TensorRT] Engine compiled successfully!")
     except subprocess.CalledProcessError as e:
         print("\n[Fatal] TensorRT compilation failed.")
-        print(f"TRT Error Output: {e.stderr}") # Affiche l'erreur réelle de NVIDIA
+        print(f"TRT Error Output: {e.stderr}")
         sys.exit(1)
 
 
@@ -162,11 +176,19 @@ def run_training(config_path: str):
         config = yaml.safe_load(f)
         
     game_name = config["name"]
-    dataset_path = Path(f"data/{game_name}/{game_name}_training_data.bin")
-    meta_path = dataset_path.with_suffix(".bin.meta.json")
+    data_dir = Path(f"data/{game_name}")
     
-    if not dataset_path.exists() or not meta_path.exists():
-        print(f"[Error] Dataset or Meta file missing at {dataset_path}")
+    # Recherche de tous les fichiers binaires d'itérations
+    bin_files = glob.glob(str(data_dir / "iteration_*.bin"))
+    
+    if not bin_files:
+        print(f"[Error] No dataset files found in {data_dir}. Run Self-Play first!")
+        return
+
+    # On utilise le meta.json global du jeu
+    meta_path = data_dir / f"{game_name}_training_data.bin.meta.json"
+    if not meta_path.exists():
+        print(f"[Error] Meta file missing at {meta_path}. Run MetaExport first!")
         return
 
     with open(meta_path, 'r') as f:
@@ -180,22 +202,27 @@ def run_training(config_path: str):
     onnx_path = model_dir / "latest_model.onnx"
     plan_path = model_dir / "latest_model.plan"
 
-    # Hyperparameters
+    # Hyperparameters (avec les nouveaux noms)
     hp = config["training"]
-    batch_size = hp.get("batchSize", 512)
-    epochs = hp.get("epochs", 5)
+    train_batch_size = hp.get("trainBatchSize", 2048)
+    epochs = hp.get("epochs", 1)
     lr = float(hp.get("learningRate", 1e-3))
     weight_decay = float(hp.get("weightDecay", 1e-4))
     value_loss_weight = float(hp.get("valueLossWeight", 1.0))
     
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[Train] Device: {device} | Iteration Batch: {batch_size}")
+    
+    # 2. Dataset & Loader (Concaténation dynamique de la Sliding Window)
+    print(f"[Train] Loading {len(bin_files)} iteration files...")
+    datasets = [OneMindArmyDataset(f) for f in bin_files]
+    full_dataset = ConcatDataset(datasets)
+    
+    print(f"[Train] Total Samples in Sliding Window: {len(full_dataset)}")
+    print(f"[Train] Device: {device} | Train Batch: {train_batch_size}")
 
-    # 2. Dataset & Loader
-    dataset = OneMindArmyDataset(str(dataset_path))
     dataloader = DataLoader(
-        dataset, 
-        batch_size=batch_size, 
+        full_dataset, 
+        batch_size=train_batch_size, 
         shuffle=True, 
         num_workers=4, 
         pin_memory=True
@@ -217,10 +244,10 @@ def run_training(config_path: str):
         epoch_v_loss = 0.0
         epoch_p_loss = 0.0
         
-        # CORRECTION 1: On lance le chrono au début de chaque epoch !
         epoch_start_time = time.time()
         
-        for batch_idx, (states, target_policies, target_results) in enumerate(dataloader):
+        # NOUVEAU: Extraction du masque légal (legal_masks) depuis le dataloader
+        for batch_idx, (states, target_policies, legal_masks, target_results) in enumerate(dataloader):
             states = states.to(device, non_blocking=True)
             target_policies = target_policies.to(device, non_blocking=True)
             legal_masks = legal_masks.to(device, non_blocking=True)
@@ -229,11 +256,15 @@ def run_training(config_path: str):
             # Normalization (Strict)
             target_policies = target_policies / (target_policies.sum(dim=-1, keepdim=True) + 1e-9)
             
-            # Forward
+            # Forward (Retourne les Logits Bruts)
             policy_logits, pred_values = model(states)
 
-            bool_mask = (legal_masks < 0.5) 
+            # --- THE MAGIC MASKING ---
+            # Tous les coups dont le mask est 0 (illégal) sont mis à -infini
+            bool_mask = (legal_masks == 0) 
             policy_logits = policy_logits.masked_fill(bool_mask, -1e9)
+            
+            # Application du log_softmax UNIQUEMENT sur les coups légaux
             pred_log_probs = torch.log_softmax(policy_logits, dim=-1)
 
             # Losses
@@ -250,14 +281,12 @@ def run_training(config_path: str):
             epoch_v_loss += v_loss.item()
             epoch_p_loss += p_loss.item()
 
-            # On n'affiche pas au batch 0 car (0 * batch_size) / elapsed = 0
             if batch_idx % 100 == 0 and batch_idx > 0:
                 elapsed = time.time() - epoch_start_time
-                samples_per_sec = (batch_idx * batch_size) / elapsed
+                samples_per_sec = (batch_idx * train_batch_size) / elapsed
                 print(f"Epoch [{epoch+1}/{epochs}] Batch [{batch_idx}/{len(dataloader)}] | "
                       f"V-Loss: {v_loss.item():.4f} | P-Loss: {p_loss.item():.4f} | {samples_per_sec:.0f} spl/s")
 
-        # CORRECTION 2: On affiche la moyenne de l'epoch à la fin !
         avg_v_loss = epoch_v_loss / len(dataloader)
         avg_p_loss = epoch_p_loss / len(dataloader)
         print(f">>> End of Epoch {epoch+1} | Avg V-Loss: {avg_v_loss:.4f} | Avg P-Loss: {avg_p_loss:.4f}\n")
@@ -266,11 +295,12 @@ def run_training(config_path: str):
     torch.save(model.state_dict(), pt_path)
     export_to_onnx(model, meta, str(onnx_path))
     
+    # On utilise le nouveau nom inferenceBatchSize pour la compilation TensorRT
     compile_tensorrt_engine(
         str(onnx_path), 
         str(plan_path), 
         meta, 
-        config["backend"].get("maxBatchSize", 1024), 
+        config["backend"].get("inferenceBatchSize", 1024), 
         config["backend"].get("precision", "fp16")
     )
 

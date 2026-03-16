@@ -2,6 +2,7 @@ import os
 import json
 import torch
 import numpy as np
+import glob
 from torch.utils.data import Dataset
 
 class OneMindArmyDataset(Dataset):
@@ -9,6 +10,7 @@ class OneMindArmyDataset(Dataset):
     Highly optimized PyTorch Dataset for loading OneMindArmy binary streams.
     Implements 'Lazy Initialization' to prevent RAM explosions with num_workers > 0 on Windows/Linux.
     Safely ignores incomplete trailing bytes caused by abrupt C++ termination.
+    Unpacks bit-packed legal move masks on the fly for extreme memory efficiency.
     """
     def __init__(self, bin_path: str):
         super().__init__()
@@ -17,11 +19,15 @@ class OneMindArmyDataset(Dataset):
         if not os.path.exists(bin_path):
             raise FileNotFoundError(f"[Dataset] Binary file not found: {bin_path}")
             
-        meta_path = f"{bin_path}.meta.json"
-        if not os.path.exists(meta_path):
-            raise FileNotFoundError(f"[Dataset] Metadata not found: {meta_path}. Run C++ MetaExport first!")
+        # 1. Résolution dynamique du meta.json (pour supporter iteration_XXXX.bin)
+        dir_name = os.path.dirname(bin_path)
+        meta_files = glob.glob(os.path.join(dir_name, "*.meta.json"))
+        
+        if not meta_files:
+            raise FileNotFoundError(f"[Dataset] Metadata not found in {dir_name}. Run C++ MetaExport first!")
+        meta_path = meta_files[0] # On prend le premier meta.json trouvé dans le dossier
 
-        # 1. Load exact C++ compiled constants
+        # 2. Load exact C++ compiled constants
         with open(meta_path, 'r') as f:
             self.meta = json.load(f)
 
@@ -30,29 +36,30 @@ class OneMindArmyDataset(Dataset):
         self.nn_input_size = self.meta["nnInputSize"]
         self.cpp_struct_size = self.meta.get("sizeofTrainingSample", None)
 
-        # 2. Define the strict Binary Layout (Matching C++ struct exactly)
+        # Calcul du nombre d'octets du bitset (arrondi au supérieur)
+        self.mask_bytes_size = (self.action_space + 7) // 8
+
+        # 3. Define the strict Binary Layout (Match EXACT de l'ordre du struct C++)
         data_fields = [
             ('nn_input', np.float32, (self.nn_input_size,)),
             ('policy', np.float32, (self.action_space,)),
-            ('legal_mask', np.float32, (self.action_space,)), # NOUVEAU: Le masque des coups légaux
-            ('result', np.float32, (self.num_players,))
+            ('result', np.float32, (self.num_players,)),
+            ('legal_mask', np.uint8, (self.mask_bytes_size,)) # Le masque ultra-compressé à la fin
         ]
         
-        # Calcul de la taille théorique (en octets, float32 = 4 octets)
-        data_size_bytes = (self.nn_input_size + (self.action_space * 2) + self.num_players) * 4
+        # Calcul de la taille théorique (float32 = 4 octets, uint8 = 1 octet)
+        data_size_bytes = ((self.nn_input_size + self.action_space + self.num_players) * 4) + (self.mask_bytes_size * 1)
 
-        # 3. Absorb C++ Padding
+        # 4. Absorb C++ Padding
         if self.cpp_struct_size and self.cpp_struct_size > data_size_bytes:
             padding_bytes = self.cpp_struct_size - data_size_bytes
             data_fields.append(('padding', np.uint8, (padding_bytes,)))
             
         self.sample_dtype = np.dtype(data_fields)
 
-        # 4. LAZY LOADING & CORRUPTION PROTECTION
-        # We explicitly DO NOT open the file here to prevent memory leaks in multiprocessing.
+        # 5. LAZY LOADING & CORRUPTION PROTECTION
         self.data = None
         
-        # We calculate the exact number of valid samples
         file_size = os.path.getsize(bin_path)
         excess_bytes = file_size % self.sample_dtype.itemsize
         
@@ -65,10 +72,8 @@ class OneMindArmyDataset(Dataset):
         return self.num_samples
 
     def __getitem__(self, idx):
-        # 5. OPEN ON FIRST READ (Worker Context)
-        # This ensures each PyTorch worker opens its own lightweight file handle.
+        # OPEN ON FIRST READ (Worker Context)
         if self.data is None:
-            # En forçant la 'shape', Numpy ignorera les octets corrompus à la fin du fichier.
             self.data = np.memmap(
                 self.bin_path, 
                 dtype=self.sample_dtype, 
@@ -78,10 +83,19 @@ class OneMindArmyDataset(Dataset):
             
         sample = self.data[idx]
         
-        # np.copy is required to transfer data from the read-only mmap to writable PyTorch tensors
+        # Extraction des tenseurs float classiques
         state_tensor  = torch.from_numpy(np.copy(sample['nn_input']))
         policy_tensor = torch.from_numpy(np.copy(sample['policy']))
-        mask_tensor   = torch.from_numpy(np.copy(sample['legal_mask'])) # Extraction du masque
         result_tensor = torch.from_numpy(np.copy(sample['result']))
+
+        # --- DÉCOMPRESSION DU MASQUE BITS ---
+        # On lit les octets
+        packed_mask = sample['legal_mask']
+        # On déploie les bits (little-endian pour matcher le (1 << i%8) du C++)
+        unpacked_mask = np.unpackbits(packed_mask, bitorder='little')
+        # On coupe les potentiels bits vides à la toute fin
+        unpacked_mask = unpacked_mask[:self.action_space]
+        # On convertit le tableau de 0 et de 1 en FloatTensor pour PyTorch
+        mask_tensor = torch.from_numpy(unpacked_mask.copy()).float()
 
         return state_tensor, policy_tensor, mask_tensor, result_tensor

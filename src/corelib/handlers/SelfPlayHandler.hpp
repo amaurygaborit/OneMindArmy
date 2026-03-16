@@ -13,6 +13,7 @@
 #include <string>
 #include <csignal>
 #include <atomic>
+#include <sstream>
 
 #include "../interfaces/IHandler.hpp"
 #include "../model/ReplayBuffer.hpp"
@@ -48,6 +49,7 @@ namespace Core
         BackendConfig  m_backendCfg;
         TrainingConfig m_trainingCfg;
         std::string m_datasetPath = "";
+        uint32_t m_currentIteration = 0;
 
         void specificSetup(const YAML::Node& config) override
         {
@@ -59,9 +61,18 @@ namespace Core
             }
             std::string gameName = config["name"].as<std::string>();
 
+            // Extraction de l'itération courante (Gérée et injectée par Python)
+            if (config["training"] && config["training"]["currentIteration"]) {
+                m_currentIteration = config["training"]["currentIteration"].as<uint32_t>();
+            }
+
             std::string dataFolder = "data/" + gameName;
             std::filesystem::create_directories(dataFolder);
-            m_datasetPath = dataFolder + "/" + gameName + "_training_data.bin";
+
+            // NOUVEAU: Formatage dynamique du fichier par itération (ex: iteration_0042.bin)
+            std::ostringstream oss;
+            oss << dataFolder << "/iteration_" << std::setw(4) << std::setfill('0') << m_currentIteration << ".bin";
+            m_datasetPath = oss.str();
         }
 
         void resetGame(GameContext& g)
@@ -88,7 +99,9 @@ namespace Core
             std::signal(SIGINT, sigintHandler);
 
             std::cout << "[SelfPlay] Starting generation: " << m_trainingCfg.gamesPerIteration << " games\n";
-            std::cout << "[SelfPlay] Parallelism: " << m_backendCfg.numParallelGames << " games | Batch: " << m_backendCfg.maxBatchSize << "\n";
+            std::cout << "[SelfPlay] Iteration File: " << m_datasetPath << "\n";
+            // On utilise la nouvelle nomenclature inferenceBatchSize
+            std::cout << "[SelfPlay] Parallelism: " << m_backendCfg.numParallelGames << " games | Batch: " << m_backendCfg.inferenceBatchSize << "\n";
 
             std::vector<GameContext> games(m_backendCfg.numParallelGames);
             size_t treeAllocatorIndex = 0;
@@ -100,13 +113,14 @@ namespace Core
                 resetGame(g);
             }
 
+            // Ouverture du fichier en append. Si le fichier n'existe pas, il sera créé.
             std::ofstream outFile(m_datasetPath, std::ios::binary | std::ios::app);
             if (!outFile.is_open()) {
                 throw std::runtime_error("Fatal Error: Could not open dataset file for writing: " + m_datasetPath);
             }
 
             uint32_t gamesFinished = 0;
-            uint64_t totalMovesPlayed = 0; // Passage en uint64 pour plus de sécurité sur de longs runs
+            uint64_t totalMovesPlayed = 0;
             auto startTime = std::chrono::high_resolution_clock::now();
 
             while (gamesFinished < m_trainingCfg.gamesPerIteration && g_keepRunning.load(std::memory_order_acquire))
@@ -140,10 +154,12 @@ namespace Core
                     }
 
                     auto encodedInput = StateEncoder<GT>::encode(povState, povHistory);
+
+                    // Envoi vers le ReplayBuffer avec le bit-packing !
                     g.replayBuffer.recordTurn(
                         encodedInput,
                         activeTree->getRootPolicy(),
-                        activeTree->getRootLegalMovesMask()
+                        activeTree->getRootLegalMovesMask() // Retourne bien le array<bool>
                     );
 
                     // 2. Play Move
@@ -176,10 +192,9 @@ namespace Core
                             double elapsedSec = std::chrono::duration<double>(now - startTime).count();
                             double movesPerSec = totalMovesPlayed / (elapsedSec > 0 ? elapsedSec : 1.0);
 
-                            // \r permet de réécrire sur la même ligne, \n pour fixer l'étape toutes les 10 parties
                             std::cout << "[SelfPlay] Progress: " << std::setw(6) << gamesFinished << " / " << m_trainingCfg.gamesPerIteration
                                 << " games | Total Moves: " << std::setw(8) << totalMovesPlayed
-                                << " | Speed: " << std::fixed << std::setprecision(1) << movesPerSec << " m/s" << std::endl;
+                                << " | Speed: " << std::fixed << std::setprecision(1) << movesPerSec << " m/s\r" << std::flush;
                         }
 
                         resetGame(g);
@@ -188,13 +203,22 @@ namespace Core
             }
 
             outFile.close();
+
+            // Calcul du temps total
             auto endTime = std::chrono::high_resolution_clock::now();
             double totalSec = std::chrono::duration<double>(endTime - startTime).count();
 
-            std::cout << "\n[SelfPlay] Finished!" << "\n - Games: " << gamesFinished
+            int hours = static_cast<int>(totalSec) / 3600;
+            int minutes = (static_cast<int>(totalSec) % 3600) / 60;
+            int seconds = static_cast<int>(totalSec) % 60;
+
+            std::cout << "\n\n[SelfPlay] Finished!"
+                << "\n - Games: " << gamesFinished
                 << "\n - Total Moves: " << totalMovesPlayed
-                << "\n - Time: " << std::fixed << std::setprecision(1) << totalSec << "s"
-                << "\n - Avg Speed: " << totalMovesPlayed / (totalSec > 0 ? totalSec : 1.0) << " m/s\n";
+                << "\n - Total Time: " << std::setfill('0') << std::setw(2) << hours << "h "
+                << std::setw(2) << minutes << "m "
+                << std::setw(2) << seconds << "s"
+                << "\n - Avg Speed: " << std::fixed << std::setprecision(1) << (totalMovesPlayed / (totalSec > 0 ? totalSec : 1.0)) << " moves/s\n";
         }
     };
 }

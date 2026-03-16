@@ -14,7 +14,7 @@ def bootstrap_v0(config_path: str):
         config = yaml.safe_load(f)
         
     game_name = config["name"]
-    trt_opt_batch = config["backend"].get("maxBatchSize", 256)
+    trt_opt_batch = config["backend"].get("inferenceBatchSize", 256)
     
     # NOUVEAU : On récupère la précision depuis le YAML (par défaut on met fp16 pour les RTX/GTX récentes)
     trt_precision = config["backend"].get("precision", "fp16").lower()
