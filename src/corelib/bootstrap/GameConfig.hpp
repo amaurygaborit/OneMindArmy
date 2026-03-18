@@ -51,13 +51,12 @@ namespace Core
         uint32_t nHeads = 0;
         uint32_t nLayers = 0;
         uint32_t dimFeedforward = 0;
-        float weightDecay = 0.0f; // Remplaçant de dropout !
 
         void load(const YAML::Node& root, const std::string& runMode)
         {
             const auto& node = root["network"];
 
-            // Le réseau est obligatoire pour l'entraînement ou l'export. En mode play, TensorRT s'en fiche.
+            // Le rï¿½seau est obligatoire pour l'entraï¿½nement ou l'export. En mode play, TensorRT s'en fiche.
             if (!node) {
                 if (runMode == "train" || runMode == "export-meta")
                     throw std::runtime_error("Config Error: Missing 'network' block (Mandatory for " + runMode + ").");
@@ -68,7 +67,6 @@ namespace Core
             nHeads = loadVal<uint32_t>(node, "nHeads", 1u, 128u);
             nLayers = loadVal<uint32_t>(node, "nLayers", 1u, 128u);
             dimFeedforward = loadVal<uint32_t>(node, "dimFeedforward", 1u, 32768u);
-            weightDecay = loadVal<float>(node, "weightDecay", 0.0f, 1.0f);
         }
     };
 
@@ -97,7 +95,7 @@ namespace Core
             maxDepth = loadVal<uint32_t>(node, "maxDepth", 1u, UINT16_MAX);
             cPUCT = loadVal<float>(node, "cPUCT", 0.0f, 100.0f);
             virtualLoss = loadVal<float>(node, "virtualLoss", 0.0f, 100.0f);
-            dirichletAlpha = loadVal<float>(node, "dirichletAlpha", 0.0f, 100.0f); // Peut être 0.0 en match
+            dirichletAlpha = loadVal<float>(node, "dirichletAlpha", 0.0f, 100.0f); // Peut ï¿½tre 0.0 en match
             dirichletEpsilon = loadVal<float>(node, "dirichletEpsilon", 0.0f, 1.0f);
             temperatureDrop = loadVal<uint32_t>(node, "temperatureDrop", 0u, 1000u);
             maxNodes = loadVal<uint32_t>(node, "maxNodes", 1000u, UINT32_MAX);
@@ -125,7 +123,7 @@ namespace Core
             if (!node) {
                 if (runMode == "train")
                     throw std::runtime_error("Config Error: Missing 'training' block (Mandatory for training).");
-                return; // Ignoré proprement en mode play
+                return; // Ignorï¿½ proprement en mode play
             }
 
             gamesPerIteration = loadVal<uint32_t>(node, "gamesPerIteration", 1u, UINT32_MAX);
@@ -214,7 +212,7 @@ namespace Core
             if (!node) {
                 if (runMode == "play")
                     throw std::runtime_error("Config Error: Missing 'session' block (Mandatory for match play).");
-                return; // Ignoré proprement en training
+                return; // Ignorï¿½ proprement en training
             }
 
             numAIs = loadVal<uint32_t>(node, "numAIs", 0u, GameConfig::kNumPlayers);

@@ -1,13 +1,12 @@
 # ==============================================================================
 # ONE MIND ARMY - PLAY CONFIGURATION
 # Game: Chess | Mode: Human vs AI / AI vs AI Match
-# Description: Optimized for single-game competitive inference (Low Latency).
 # ==============================================================================
-name: "chess"
 
-# --- 2. MATCH ENGINE (Competitive Mode) ---
+name: chess
+
 engine:
-  numSimulations: 10000    # Increased for stronger play in live match
+  numSimulations: 800
   maxDepth: 128
 
   cPUCT: 1.5
@@ -16,27 +15,25 @@ engine:
   temperatureDrop: 0       # Always play the best move (temp ~0)
   virtualLoss: 2.0         # Lower penalty needed for single game
 
-  maxNodes: 1000000        # Allow the tree to grow huge for one game
+  maxNodes: 2000           # Allow the tree to grow huge for one game
   memoryThreshold: 0.90
-  reuseTree: true          # Reuse tree between turns to think on opponent's time
+  reuseTree: false         # Reuse tree between turns to think on opponent's time
 
-# --- 4. LOCAL BACKEND (Low Latency) ---
 backend:
-  numGPUs: 1
+  numGPUs: auto
 
   inferenceBatchSize: 256         # Small batch size for instant TensorRT response
   numParallelGames: 1
 
   precision: "fp16"
 
-  numSearchThreads: 4      # Blast all CPU cores on this single game
+  numSearchThreads: 4             # Blast all CPU cores on this single game
   numBackpropThreads: 2
   numInferenceThreads: 1
 
-  queueScale: 1.0
+  queueScale: 3.0
   fastDrain: true
 
-# --- 5. INFERENCE SESSION (Human Interface) ---
 session:
   numAIs: 2                # 1 = Human vs AI
   autoInitialState: true
@@ -45,7 +42,7 @@ session:
   verbose: true
 
   renderState: true
-  renderValidActions: true # Helpful for human player
+  renderValidActions: true
   renderActionPlayed: true
   renderResult: true
 

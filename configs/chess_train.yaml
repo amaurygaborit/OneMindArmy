@@ -1,56 +1,56 @@
 # ==============================================================================
-# ONE MIND ARMY - TRAINING CONFIGURATION
-# Game: Chess | Mode: Self-Play for training
-# Description: Optimized for massive parallel generation on Cloud/Heavy GPUs.
+# ONE MIND ARMY - TRAIN CONFIGURATION
+# Game: Chess | Mode: AI vs AI
 # ==============================================================================
-name: "chess"
 
-# --- 1. NETWORK ARCHITECTURE (Shared) ---
+name: chess
+
 network:
   dModel: 256
   nHeads: 8
   nLayers: 10
   dimFeedforward: 512
-  weightDecay: 0.0001
 
-# --- 2. TRAINING ENGINE (Exploration Mode) ---
 engine:
-  numSimulations: 800      # Fast passes for mass generation
+  numSimulations: 800
   maxDepth: 128
 
   cPUCT: 1.5
-  dirichletAlpha: 0.3      # EXPLORATION ON
-  dirichletEpsilon: 0.25   # EXPLORATION ON
-  temperatureDrop: 30      # Shift to exploitation mid-game
+  dirichletAlpha: 0.3
+  dirichletEpsilon: 0.25
+  temperatureDrop: 30
   virtualLoss: 0.0
 
   maxNodes: 1000
   memoryThreshold: 0.90
   reuseTree: false
 
-# --- 3. TRAINING LOOP (PyTorch) ---
 training:
   gamesPerIteration: 5000
-  slidingWindowSamples: 2000000
+  slidingWindowSamples: 6000000
+  maxWindowIterations: 10
+
   epochs: 1
+  trainBatchSize: 1024
 
-  trainBatchSize: 2048
   learningRate: 0.001
+  lrMinFactor: 0.1
   weightDecay: 0.0001
-  valueLossWeight: 1.0
+  valueLossWeight: 0.25
 
-# --- 4. CLOUD BACKEND (Massive Parallelism) ---
+  currentIteration: 0
+
 backend:
-  numGPUs: "auto"
+  numGPUs: auto
 
-  inferenceBatchSize: 1024
-  numParallelGames: 3072
+  inferenceBatchSize: 2048
+  numParallelGames: 8192
 
-  precision: "fp16"
+  precision: fp16
 
   numSearchThreads: 23
   numBackpropThreads: 7
   numInferenceThreads: 1
-
+  
   queueScale: 3.0
   fastDrain: true
