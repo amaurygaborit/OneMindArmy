@@ -95,6 +95,14 @@ namespace Core
             edge.totalValue.fetch_add(virtualLossPenalty, std::memory_order_relaxed);
         }
 
+        // À ajouter dans SearchStrategy.hpp côté StrategyPUCT
+        // (nécessaire pour getRootValue)
+        static float getQ(const EdgeData& e) {
+            float n = static_cast<float>(e.visitCount.load(std::memory_order_relaxed));
+            if (n < 1.0f) return 0.0f;
+            return e.totalValue.load(std::memory_order_relaxed) / n;
+        }
+
         // ------------------------------------------------------------------------
         // POLICY EXTRACTION
         // ------------------------------------------------------------------------

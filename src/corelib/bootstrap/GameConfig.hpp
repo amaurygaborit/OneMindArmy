@@ -77,14 +77,16 @@ namespace Core
     {
         uint32_t numSimulations;
         uint32_t maxDepth;
-        float cPUCT;
-        float virtualLoss;
-        float dirichletAlpha;
-        float dirichletEpsilon;
+        float    cPUCT;
+        float    virtualLoss;
+        float    dirichletAlpha;
+        float    dirichletEpsilon;
         uint32_t temperatureDrop;
         uint32_t maxNodes;
-        float memoryThreshold;
-        bool reuseTree;
+        float    memoryThreshold;
+        bool     reuseTree;
+        float    resignThreshold;
+        uint32_t resignMinPly;
 
         void load(const YAML::Node& root, const std::string& /*runMode*/)
         {
@@ -101,6 +103,8 @@ namespace Core
             maxNodes = loadVal<uint32_t>(node, "maxNodes", 1000u, UINT32_MAX);
             memoryThreshold = loadVal<float>(node, "memoryThreshold", 0.1f, 1.0f);
             reuseTree = loadVal<bool>(node, "reuseTree", false, true);
+            resignThreshold = loadVal<float>(node, "resignThreshold", -2.0f, 0.0f);
+            resignMinPly = loadVal<uint32_t>(node, "resignMinPly", 1u, UINT16_MAX);
         }
     };
 

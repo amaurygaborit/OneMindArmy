@@ -320,56 +320,88 @@ namespace Chess
 		}
 		return (checkCount > 0);
 	}
-	std::optional<GameResult> ChessEngine::getGameResult(const State& state, std::span<const uint64_t> hashHistory) const
+	std::optional<GameResult> ChessEngine::getGameResult(
+		const State& state,
+		std::span<const uint64_t> hashHistory) const
 	{
-		// 1. Nul mathématique (Règle des 50 coups ou Matériel insuffisant)
+		// ==================================================================
+		// 1. HARD CAP — Plafond absolu de longueur de partie
+		//    hashHistory.size() = nombre de positions vues depuis le début
+		//    = ply count exact, sans aucun calcul supplémentaire.
+		//    Résultat : nul (les deux joueurs n'ont pas su conclure).
+		//    → Ne casse PAS les perft car getGameResult n'est jamais appelé
+		//      dans un perft.
+		// ==================================================================
+		if (static_cast<int>(hashHistory.size()) >= 300)
+		{
+			return GameResult{ { 0.0f, 0.0f }, ChessEndReason::MaxPlyReached };
+		}
+
+		// ==================================================================
+		// 2. RÈGLE DES 50 COUPS
+		//    100 demi-coups sans capture ni poussée de pion.
+		// ==================================================================
 		if (isFiftyMoveRule(state))
 		{
-			return GameResult{ {0.0f, 0.0f }, ChessEndReason::FiftyMoveRule };
+			return GameResult{ { 0.0f, 0.0f }, ChessEndReason::FiftyMoveRule };
 		}
+
+		// ==================================================================
+		// 3. MATÉRIEL INSUFFISANT
+		//    Détection statique — aucun mat théoriquement possible.
+		// ==================================================================
 		if (isInsufficientMaterial(state))
 		{
-			return GameResult{ {0.0f, 0.0f }, ChessEndReason::InsufficientMaterial };
+			return GameResult{ { 0.0f, 0.0f }, ChessEndReason::InsufficientMaterial };
 		}
 
-		// 2. Nul par Triple Répétition (FIDE 9.2)
-		uint64_t currentHash = state.hash();
-		int repetitionCount = 0;
+		// ==================================================================
+		// 4. TRIPLE RÉPÉTITION (FIDE 9.2)
+		//    On compte les occurrences du hash courant dans l'historique.
+		//    Note : le hash courant EST dans hashHistory (poussé avant l'appel),
+		//    donc seuil à >= 3.
+		// ==================================================================
+		{
+			const uint64_t currentHash = state.hash();
+			int            repetitions = 0;
 
-		for (uint64_t h : hashHistory) {
-			if (h == currentHash) {
-				repetitionCount++;
+			for (const uint64_t h : hashHistory)
+			{
+				if (h == currentHash)
+					++repetitions;
+			}
+
+			if (repetitions >= 3)
+			{
+				return GameResult{ { 0.0f, 0.0f }, ChessEndReason::Repetition };
 			}
 		}
 
-		// Si la position a été rencontrée au moins 3 fois (en incluant l'actuelle) -> Match Nul
-		if (repetitionCount >= 3) {
-			return GameResult{ {0.0f, 0.0f }, ChessEndReason::Repetition };
-		}
+		// ==================================================================
+		// 5. MAT / PAT
+		//    Génération des coups légaux — coûteux, donc en dernier.
+		//    On l'appelle UNE SEULE FOIS ici.
+		// ==================================================================
+		const ActionList actionList = getValidActions(state, hashHistory);
 
-		// 3. Génération des coups (passage de l'historique)
-		ActionList actionList = getValidActions(state, hashHistory);
-
-		// 4. Détection du Mat ou Pat
 		if (actionList.empty())
 		{
-			// Si le Roi n'est pas en échec, c'est un Pat (Stalemate)
 			if (!ourKingInCheck(state))
 			{
-				return GameResult{ {0.0f, 0.0f }, ChessEndReason::Stalemate };
+				// Aucun coup légal, roi non en échec → Pat
+				return GameResult{ { 0.0f, 0.0f }, ChessEndReason::Stalemate };
 			}
-			// S'il est en échec, c'est un Échec et Mat
-			else if (state.getMeta(SLOT_TURN).ownerId() == WHITE)
-			{
-				return GameResult{ -1.0f, 1.0f, ChessEndReason::Checkmate }; // Les Noirs gagnent
-			}
+
+			// Aucun coup légal, roi en échec → Mat
+			// Le joueur dont c'est le tour a perdu.
+			const bool whiteToMove = (state.getMeta(SLOT_TURN).ownerId() == WHITE);
+			if (whiteToMove)
+				return GameResult{ { -1.0f, 1.0f }, ChessEndReason::Checkmate }; // Noirs gagnent
 			else
-			{
-				return GameResult{ 1.0f, -1.0f, ChessEndReason::Checkmate }; // Les Blancs gagnent
-			}
+				return GameResult{ { 1.0f, -1.0f }, ChessEndReason::Checkmate }; // Blancs gagnent
 		}
 
-		// Le jeu continue (pas de résultat)
+		// La partie continue
 		return std::nullopt;
 	}
 

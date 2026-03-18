@@ -13,17 +13,17 @@ namespace Chess
         // CONSTANTES OBLIGATOIRES (Concept ValidGameTraits)
         // ========================================================================
         
-		// 6 types de pièces
+		// 6 types de piï¿½ces
         static constexpr uint32_t kNumElemTypes = 6;
 
-        // 7 types de métadonnées
+        // 7 types de mï¿½tadonnï¿½es
         static constexpr uint32_t kNumMetaTypes = 6;
 
 
-        // 32 slot de pièces physiques maximum sur le plateau en même temps
+        // 32 slot de piï¿½ces physiques maximum sur le plateau en mï¿½me temps
         static constexpr uint32_t kMaxElems = 32;
 
-        // 9 slots de métadonnées (Car les droits de roque prennent 4 slots, etc.)
+        // 9 slots de mï¿½tadonnï¿½es (Car les droits de roque prennent 4 slots, etc.)
         static constexpr uint32_t kMaxMetas = 8;
 
 
@@ -101,8 +101,10 @@ namespace Chess
         None = 0,
         Checkmate = 1,
         Stalemate = 2,           // Pat
-        Repetition = 3,          // Triple répétition
-        FiftyMoveRule = 4,       // Règle des 50 coups
-        InsufficientMaterial = 5 // Matériel insuffisant
+        Repetition = 3,          // Triple rï¿½pï¿½tition
+        FiftyMoveRule = 4,       // Rï¿½gle des 50 coups
+        InsufficientMaterial = 5,// Matï¿½riel insuffisant
+        MaxPlyReached = 6,       // Limite de profondeur atteinte (pour les parties longues),
+		Resigned = 7             // RÃ©signation
     };
 }

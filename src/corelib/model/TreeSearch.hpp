@@ -505,6 +505,53 @@ namespace Core
             return m_nodeAction[start + num - 1];
         }
 
+        // ------------------------------------------------------------------
+        // getRootValue()
+        //
+        // Retourne le Q-value du root du point de vue du joueur courant,
+        // i.e. la valeur estimée de la position actuelle pour le joueur
+        // qui doit jouer.
+        //
+        // Méthode : moyenne pondérée par les visites des Q-values de tous
+        // les enfants du root. Chaque edge enfant stocke la valeur accumulée
+        // pour le joueur qui a joué depuis le root (= le joueur courant),
+        // car backprop fait : Strategy::update(edge[path[i]], values[playerWhoMoved])
+        // avec playerWhoMoved = pathActions[i-1].ownerId() = le joueur du root.
+        //
+        // On préfère la moyenne pondérée au Q du meilleur enfant car elle est
+        // plus stable en début de recherche (peu de simulations).
+        // ------------------------------------------------------------------
+        [[nodiscard]] float getRootValue() const
+        {
+            if (m_rootIdx == UINT32_MAX)
+                return 0.0f;
+
+            uint32_t num = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
+            if (num == 0)
+                return 0.0f;
+
+            uint32_t start = m_nodeFirstChild[m_rootIdx];
+
+            float total_weighted_q = 0.0f;
+            float total_visits = 0.0f;
+
+            for (uint32_t i = 0; i < num; ++i)
+            {
+                float visits = static_cast<float>(
+                    Strategy::getPolicyMetric(m_nodeEdges[start + i]));
+                float q = Strategy::getQ(m_nodeEdges[start + i]);
+
+                total_weighted_q += visits * q;
+                total_visits += visits;
+            }
+
+            // Pas encore assez de simulations pour avoir une estimation fiable
+            if (total_visits < 1.0f)
+                return 0.0f;
+
+            return total_weighted_q / total_visits;
+        }
+
         [[nodiscard]] std::array<float, Defs::kActionSpace> getRootPolicy() const {
             std::array<float, Defs::kActionSpace> pol{};
             if (m_rootIdx == UINT32_MAX) return pol;

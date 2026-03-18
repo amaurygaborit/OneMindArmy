@@ -19,6 +19,9 @@ engine:
   memoryThreshold: 0.90
   reuseTree: false         # Reuse tree between turns to think on opponent's time
 
+  resignThreshold: -0.95
+  resignMinPly: 40
+
 backend:
   numGPUs: auto
 
