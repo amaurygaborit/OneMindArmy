@@ -200,7 +200,7 @@ namespace Chess
 
         std::cout << "\n=== End of Game ===\n";
 
-        // 1. Affichage de la cause (La nouveauté architecturale)
+        // 1. Affichage de la cause
         auto reason = static_cast<ChessEndReason>(result.reason);
         switch (reason)
         {
@@ -219,20 +219,28 @@ namespace Chess
         case ChessEndReason::InsufficientMaterial:
             std::cout << "Reason: Insufficient Material" << std::endl;
             break;
+        case ChessEndReason::MaxPlyReached:
+            std::cout << "Reason: Max Ply Limit Reached (Hard Cap)" << std::endl;
+            break;
+        case static_cast<ChessEndReason>(7): // L'ID d'abandon codé dans le SelfPlayHandler
+            std::cout << "Reason: Resignation" << std::endl;
+            break;
         case ChessEndReason::None:
         default:
-            // Si la raison est 0, c'est que la partie a été arrêtée manuellement ou par une limite externe
             std::cout << "Reason: Adjudicated / Limit Reached" << std::endl;
             break;
         }
 
-        // 2. Affichage classique du vainqueur via les scores
-        float whiteScore = result[0];
-        float blackScore = result[1];
+        // 2. Affichage du vainqueur via le tableau WDL
+        // La structure wdl contient : [W_Win, W_Draw, W_Loss, B_Win, B_Draw, B_Loss]
+        float whiteWin = result.wdl[0];
+        float blackWin = result.wdl[3];
 
-        if (whiteScore > blackScore)
+        // On utilise > 0.5f au lieu de == 1.0f pour se protéger des infimes 
+        // approximations des flottants si jamais le réseau renvoie la prédiction brute.
+        if (whiteWin > 0.5f)
             std::cout << "Outcome: White wins!" << std::endl;
-        else if (blackScore > whiteScore)
+        else if (blackWin > 0.5f)
             std::cout << "Outcome: Black wins!" << std::endl;
         else
             std::cout << "Outcome: Draw!" << std::endl;

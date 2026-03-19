@@ -7,6 +7,7 @@ import subprocess
 import glob
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import time
 from pathlib import Path
@@ -24,33 +25,17 @@ except ImportError:
 # ==============================================================================
 
 class TrainingLogger:
-    """
-    Appends training metrics to a JSONL file (one JSON object per line).
-
-    Two record types:
-      "batch" — written every `log_every` batches  →  fine-grained loss curves
-      "epoch" — written once per epoch             →  iteration-level summary
-
-    The file is opened in append mode so it accumulates cleanly across
-    all iterations and survives restarts without data loss.
-
-    Format example:
-      {"type":"batch","iteration":3,"epoch":1,"global_step":45200,...}
-      {"type":"epoch","iteration":3,"epoch":1,"avg_v_loss":0.091,...}
-    """
-
     def __init__(self, log_path: Path, log_every: int = 100):
         self.log_path  = log_path
         self.log_every = log_every
         log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._f = open(log_path, "a", buffering=1)   # line-buffered for safety
+        self._f = open(log_path, "a", buffering=1)
 
     def _write(self, record: dict):
         self._f.write(json.dumps(record, separators=(",", ":")) + "\n")
 
     def log_batch(self, *, iteration, epoch, global_step, batch_idx,
                   v_loss, p_loss, total_loss, grad_norm, lr, samples_per_s):
-        """Log one batch record (only every log_every steps)."""
         if batch_idx % self.log_every != 0:
             return
         self._write({
@@ -59,17 +44,16 @@ class TrainingLogger:
             "epoch":         epoch,
             "global_step":   global_step,
             "batch_idx":     batch_idx,
-            "v_loss":        round(v_loss,       6),
-            "p_loss":        round(p_loss,       6),
-            "total_loss":    round(total_loss,   6),
-            "grad_norm":     round(grad_norm,    6),
-            "lr":            round(lr,           8),
+            "v_loss":        round(v_loss,      6),
+            "p_loss":        round(p_loss,      6),
+            "total_loss":    round(total_loss,  6),
+            "grad_norm":     round(grad_norm,   6),
+            "lr":            round(lr,          8),
             "samples_per_s": round(samples_per_s, 1),
         })
 
     def log_epoch(self, *, iteration, epoch, avg_v_loss, avg_p_loss,
                   avg_total_loss, time_s, num_samples, num_batches):
-        """Log one epoch summary record."""
         self._write({
             "type":           "epoch",
             "iteration":      iteration,
@@ -104,7 +88,7 @@ class OneMindArmyNet(nn.Module):
 
         if self.nn_input_size % self.kTokenDim != 0:
             print(f"[Warning] nnInputSize ({self.nn_input_size}) is not divisible by "
-                  f"kTokenDim ({self.kTokenDim}). Check your meta.json.")
+                  f"kTokenDim ({self.kTokenDim}).")
 
         self.d_model  = config["network"].get("dModel", 256)
         self.n_heads  = config["network"].get("nHeads", 16)
@@ -128,12 +112,12 @@ class OneMindArmyNet(nn.Module):
             nn.Linear(self.d_model, self.action_space),
         )
 
-        # Game-agnostic: one value scalar per player
+        # NEW WDL HEAD: Output is [Batch, num_players * 3] raw logits.
+        # No Tanh/Softmax here, it will be handled by CrossEntropyLoss and the ONNX Wrapper.
         self.value_head = nn.Sequential(
             nn.Linear(self.d_model, 64),
             nn.ReLU(),
-            nn.Linear(64, self.num_players),
-            nn.Tanh(),
+            nn.Linear(64, self.num_players * 3), 
         )
 
     def forward(self, x):
@@ -141,9 +125,11 @@ class OneMindArmyNet(nn.Module):
         x = self.embedding(x) + self.pos_encoder
         x = self.transformer(x)
         global_repr   = x.mean(dim=1)
+        
         policy_logits = self.policy_head(global_repr)
-        value_pred    = self.value_head(global_repr)
-        return policy_logits, value_pred
+        wdl_logits    = self.value_head(global_repr)
+        
+        return policy_logits, wdl_logits
 
 
 # ==============================================================================
@@ -151,19 +137,31 @@ class OneMindArmyNet(nn.Module):
 # ==============================================================================
 
 class ONNXExportWrapper(nn.Module):
-    def __init__(self, base_model):
+    def __init__(self, base_model, num_players):
         super().__init__()
         self.base_model = base_model
+        self.num_players = num_players
 
     def forward(self, x):
-        policy_logits, value_pred = self.base_model(x)
-        return torch.softmax(policy_logits, dim=-1), value_pred
+        policy_logits, wdl_logits = self.base_model(x)
+        
+        # Policy to Probabilities
+        policy_probs = torch.softmax(policy_logits, dim=-1)
+        
+        # WDL to Probabilities (per player)
+        # Reshape to [Batch, Players, 3], apply softmax over the 3 classes, then flatten back
+        batch_size = wdl_logits.size(0)
+        wdl_reshaped = wdl_logits.view(batch_size, self.num_players, 3)
+        wdl_probs = torch.softmax(wdl_reshaped, dim=-1)
+        wdl_out = wdl_probs.view(batch_size, self.num_players * 3)
+        
+        return policy_probs, wdl_out
 
 
 def export_to_onnx(model, meta, save_path):
     print(f"\n[Export] Saving ONNX model → {save_path}")
     model.eval()
-    export_model = ONNXExportWrapper(model)
+    export_model = ONNXExportWrapper(model, meta["numPlayers"])
     export_model.eval()
     device      = next(model.parameters()).device
     dummy_input = torch.randn(1, meta["nnInputSize"]).to(device)
@@ -217,7 +215,6 @@ def save_checkpoint(path, model, optimizer, global_step, iteration):
 
 
 def load_checkpoint(path, model, optimizer, device):
-    """Returns (global_step, iteration). Handles legacy weights-only format."""
     raw = torch.load(path, map_location=device, weights_only=False)
 
     if isinstance(raw, dict) and "model" in raw:
@@ -228,8 +225,8 @@ def load_checkpoint(path, model, optimizer, device):
                 print("[Checkpoint] Optimizer state restored.")
             except Exception as e:
                 print(f"[Checkpoint] Warning: optimizer state incompatible ({e}). Starting fresh.")
-        gs   = raw.get("global_step", 0)
-        itr  = raw.get("iteration",   0)
+        gs  = raw.get("global_step", 0)
+        itr = raw.get("iteration",   0)
         print(f"[Checkpoint] Loaded  iter={itr}  global_step={gs}")
         return gs, itr
 
@@ -243,14 +240,12 @@ def load_checkpoint(path, model, optimizer, device):
 # ==============================================================================
 
 def run_training(config_path: str):
-    # 1. Config ----------------------------------------------------------------
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
     game_name = config["name"]
     data_dir  = Path(f"data/{game_name}")
 
-    # 2. Dataset files ---------------------------------------------------------
     bin_files = sorted(glob.glob(str(data_dir / "iteration_*.bin")))
     if not bin_files:
         print(f"[Error] No dataset files found in {data_dir}. Run Self-Play first!")
@@ -260,24 +255,24 @@ def run_training(config_path: str):
     max_window_files = hp.get("maxWindowIterations", 10)
     if len(bin_files) > max_window_files:
         n = len(bin_files) - max_window_files
-        print(f"[Train] Sliding window: discarding {n} oldest file(s) from this run (not deleted on disk).")
+        print(f"[Train] Sliding window: discarding {n} oldest file(s) from this run.")
         bin_files = bin_files[-max_window_files:]
 
-    # 3. Metadata --------------------------------------------------------------
     meta_path = data_dir / f"{game_name}_training_data.bin.meta.json"
     if not meta_path.exists():
         print(f"[Error] Meta file missing at {meta_path}.")
         return
     with open(meta_path, "r") as f:
         meta = json.load(f)
+        
+    num_players = meta["numPlayers"]
 
-    # 4. Hyperparameters -------------------------------------------------------
     train_batch_size  = hp.get("trainBatchSize",   1024)
     epochs            = hp.get("epochs",           1)
     lr                = float(hp.get("learningRate",  1e-3))
     lr_min_factor     = float(hp.get("lrMinFactor",   0.1))
     weight_decay      = float(hp.get("weightDecay",   1e-4))
-    value_loss_weight = float(hp.get("valueLossWeight", 0.25))
+    value_loss_weight = float(hp.get("valueLossWeight", 0.5)) # Slightly higher for WDL
     current_iteration = hp.get("currentIteration",  0)
     log_every         = hp.get("logEveryNBatches",  100)
 
@@ -287,15 +282,11 @@ def run_training(config_path: str):
     print(f"[Train] Game: {game_name}  |  Iteration: {current_iteration}")
     print(f"[Train] Device: {device}  |  Batch: {train_batch_size}  |  Epochs: {epochs}")
     print(f"[Train] LR: {lr}  |  valueLossWeight: {value_loss_weight}")
-    print(f"[Train] Log every {log_every} batches")
     print(f"{'='*60}\n")
 
-    # 5. Logger ----------------------------------------------------------------
     log_path = data_dir / "training_log.jsonl"
     tlogger  = TrainingLogger(log_path, log_every=log_every)
-    print(f"[Train] Metrics → {log_path}\n")
 
-    # 6. Dataset & DataLoader --------------------------------------------------
     print(f"[Train] Loading {len(bin_files)} iteration file(s)...")
     full_dataset = ConcatDataset([OneMindArmyDataset(f) for f in bin_files])
     print(f"[Train] Total samples: {len(full_dataset):,}")
@@ -305,7 +296,6 @@ def run_training(config_path: str):
         num_workers=4, pin_memory=True, persistent_workers=True,
     )
 
-    # 7. Model & Optimizer -----------------------------------------------------
     model_dir       = Path(f"models/{game_name}")
     model_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_path = model_dir / "latest_checkpoint.pt"
@@ -319,39 +309,51 @@ def run_training(config_path: str):
     if checkpoint_path.exists():
         print(f"[Train] Resuming from: {checkpoint_path.name}")
         global_step, _ = load_checkpoint(checkpoint_path, model, optimizer, device)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
     else:
         print("[Train] No checkpoint — starting from random weights.")
 
-    # 8. Scheduler (cosine decay over the full epoch) --------------------------
     total_steps = len(dataloader) * epochs
     scheduler   = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=total_steps, eta_min=lr * lr_min_factor,
     )
 
-    mse_criterion = nn.MSELoss()
-
-    # 9. Training loop ---------------------------------------------------------
     for epoch in range(epochs):
         model.train()
         sum_v = sum_p = sum_t = 0.0
         epoch_start = time.time()
 
-        for batch_idx, (states, target_policies, legal_masks, target_results) in enumerate(dataloader):
+        for batch_idx, (states, target_policies, legal_masks, target_wdl) in enumerate(dataloader):
             states          = states.to(device,          non_blocking=True)
             target_policies = target_policies.to(device, non_blocking=True)
             legal_masks     = legal_masks.to(device,     non_blocking=True)
-            target_results  = target_results.to(device,  non_blocking=True)
+            target_wdl      = target_wdl.to(device,      non_blocking=True) # Shape: [Batch, Players, 3]
 
             target_policies = target_policies / (
                 target_policies.sum(dim=-1, keepdim=True) + 1e-9
             )
 
-            policy_logits, pred_values = model(states)
+            policy_logits, wdl_logits = model(states)
+            
+            # --- POLICY LOSS ---
             policy_logits  = policy_logits.masked_fill(legal_masks == 0, -1e9)
             pred_log_probs = torch.log_softmax(policy_logits, dim=-1)
+            p_loss         = -torch.sum(target_policies * pred_log_probs, dim=1).mean()
 
-            v_loss     = mse_criterion(pred_values, target_results)
-            p_loss     = -torch.sum(target_policies * pred_log_probs, dim=1).mean()
+            # --- VALUE LOSS (WDL Multi-Player Cross Entropy) ---
+            # wdl_logits is [Batch, Players * 3] -> reshape to [Batch, Players, 3]
+            wdl_logits_reshaped = wdl_logits.view(-1, num_players, 3)
+            
+            v_loss = 0.0
+            for p in range(num_players):
+                # We use cross_entropy with soft labels (target_wdl is probabilities)
+                v_loss += F.cross_entropy(wdl_logits_reshaped[:, p, :], target_wdl[:, p, :])
+            
+            # Average the WDL loss across all players
+            v_loss = v_loss / num_players
+
+            # --- TOTAL LOSS ---
             total_loss = (value_loss_weight * v_loss) + p_loss
 
             optimizer.zero_grad(set_to_none=True)
@@ -369,17 +371,15 @@ def run_training(config_path: str):
             elapsed       = time.time() - epoch_start
             samples_per_s = ((batch_idx + 1) * train_batch_size) / max(elapsed, 1e-6)
 
-            # Console (skip batch 0 to avoid spurious first-batch noise in the print)
             if batch_idx > 0 and batch_idx % log_every == 0:
                 print(
                     f"  Ep[{epoch+1}/{epochs}] "
                     f"Batch[{batch_idx:>6}/{len(dataloader)}] | "
-                    f"V:{v_loss.item():.4f}  P:{p_loss.item():.4f}  "
+                    f"V(wdl):{v_loss.item():.4f}  P:{p_loss.item():.4f}  "
                     f"Norm:{grad_norm:.3f}  LR:{current_lr:.2e}  "
                     f"{samples_per_s:,.0f} spl/s"
                 )
 
-            # File log (includes batch 0 — useful to see the very first loss value)
             tlogger.log_batch(
                 iteration=current_iteration, epoch=epoch + 1,
                 global_step=global_step, batch_idx=batch_idx,
@@ -406,7 +406,6 @@ def run_training(config_path: str):
 
     tlogger.close()
 
-    # 10. Save & export --------------------------------------------------------
     save_checkpoint(checkpoint_path, model, optimizer, global_step, current_iteration)
     export_to_onnx(model, meta, str(onnx_path))
     compile_tensorrt_engine(

@@ -161,14 +161,18 @@ class OneMindArmyPipeline:
         """
         Delete the oldest iteration_*.bin files until the total sample count
         is within `slidingWindowSamples` (read from YAML training section).
-        Always keeps at least 1 file.
+        Dynamically reads sizeofTrainingSample from meta.json to support WDL struct changes.
         """
         max_samples = self.config.get("training", {}).get("slidingWindowSamples", 7_500_000)
 
-        meta_path = self.data_dir / f"{self.game_name}_training_data.bin.meta.json"
-        if not meta_path.exists():
+        meta_files = sorted(self.data_dir.glob("*.meta.json"))
+        if not meta_files:
             logger.warning("[SlidingWindow] meta.json not found — skipping window enforcement.")
             return
+
+        # Try to find the canonical meta.json
+        canonical_meta = self.data_dir / f"{self.game_name}_training_data.bin.meta.json"
+        meta_path = canonical_meta if canonical_meta.exists() else meta_files[0]
 
         with open(meta_path, "r") as f:
             meta = json.load(f)
@@ -274,13 +278,15 @@ class OneMindArmyPipeline:
             f"{'='*60}"
         )
 
+        # On garde le nom "best_model.plan" par compatibilité avec ton init_v0.py,
+        # mais conceptuellement, c'est simplement le "deployed_model".
         best_model_name = "best_model.plan"
         best_model_path  = self.models_dir / best_model_name
         latest_model_path = self.models_dir / "latest_model.plan"
 
         # Bootstrap if no TRT engine exists yet
         if not best_model_path.exists():
-            logger.warning("No 'best_model.plan' found — running v0 initialization ...")
+            logger.warning(f"No '{best_model_name}' found — running v0 initialization ...")
             self.phase_bootstrap()
             self.wait_for_vram_cleanup()
 
@@ -309,15 +315,14 @@ class OneMindArmyPipeline:
             self.phase_train()
             self.wait_for_vram_cleanup()
 
-            # 4. Promote latest → best
-            #    NOTE: A proper AlphaZero implementation would run a tournament
-            #    here and only promote if the new model wins ≥ 55% of games.
-            #    That requires C++ support for "evaluation mode" and is left
-            #    as a future improvement. For now we always promote.
+            # 4. Unconditional Promotion (AlphaZero Continuous Training)
+            # Following DeepMind's final AlphaZero paper and Leela Chess Zero,
+            # we DO NOT use a gating/tournament system. The newly trained network
+            # unconditionally replaces the previous one to prevent knowledge rejection.
             if latest_model_path.exists():
                 shutil.copy(latest_model_path, best_model_path)
                 logger.info(
-                    f"[Promote] latest_model.plan → best_model.plan  "
+                    f"[ContinuousDeployment] Overwriting {best_model_name} with newly trained weights. "
                     f"(iteration {iteration} complete)"
                 )
             else:

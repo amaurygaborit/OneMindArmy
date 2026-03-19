@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 
 #include <mutex>
 #include <condition_variable>
@@ -49,7 +49,7 @@ namespace Core
                 std::lock_guard<std::mutex> lock(m_mutex);
                 m_closed = true;
                 m_fastDrain = fastDrain;
-                if (m_fastDrain) m_count = 0; // Drop pending items immediately
+                if (m_fastDrain) m_count = 0;
             }
             m_cv_push.notify_all();
             m_cv_pop.notify_all();
@@ -81,7 +81,6 @@ namespace Core
             if (m_closed && (m_count == 0 || m_fastDrain)) return 0;
 
             size_t n = std::min(m_count, maxItems);
-
             if (n == 0) return 0;
 
             for (size_t i = 0; i < n; ++i) {
@@ -124,45 +123,45 @@ namespace Core
 
         struct TreeTask {
             TreeSearch<GT>* tree;
-            uint32_t targetSims;
-            bool isSelfPlay;
+            uint32_t        targetSims;
+            bool            isSelfPlay;
         };
 
         struct EvalTask {
             TreeSearch<GT>* tree;
             Event* ctx;
-            uint32_t targetSims;
-            bool isSelfPlay;
+            uint32_t        targetSims;
+            bool            isSelfPlay;
         };
 
-        std::shared_ptr<IEngine<GT>> m_engine;
-        AlignedVec<std::unique_ptr<NeuralNet<GT>>> m_neuralNets;
-        AlignedVec<std::unique_ptr<Event>> m_eventPool;
+        std::shared_ptr<IEngine<GT>>                    m_engine;
+        AlignedVec<std::unique_ptr<NeuralNet<GT>>>      m_neuralNets;
+        AlignedVec<std::unique_ptr<Event>>              m_eventPool;
 
         BlockingQueue<TreeTask> m_qReadyTrees;
         BlockingQueue<Event*>   m_qFree;
         BlockingQueue<EvalTask> m_qEval;
         BlockingQueue<EvalTask> m_qBackprop;
 
-        std::vector<std::thread> m_workers;
-        std::atomic<bool> m_running{ true };
-        bool m_fastDrain;
+        std::vector<std::thread>    m_workers;
+        std::atomic<bool>           m_running{ true };
+        bool                        m_fastDrain;
 
-        std::atomic<uint32_t> m_pendingSimulations{ 0 };
-        std::mutex m_mainMutex;
+        std::atomic<uint32_t>   m_pendingSimulations{ 0 };
+        std::mutex              m_mainMutex;
         std::condition_variable m_mainCV;
 
         std::atomic<uint32_t> m_starvationCount{ 0 };
 
     public:
-        ThreadPool(std::shared_ptr<IEngine<GT>> engine,
+        ThreadPool(std::shared_ptr<IEngine<GT>>                engine,
             AlignedVec<std::unique_ptr<NeuralNet<GT>>>&& nets,
             const BackendConfig& backendCfg,
             const EngineConfig& engineCfg)
             : m_engine(engine)
             , m_neuralNets(std::move(nets))
             , m_fastDrain(backendCfg.fastDrain)
-            , m_qReadyTrees(static_cast<size_t>(backendCfg.numParallelGames * 4 * backendCfg.queueScale))
+            , m_qReadyTrees(static_cast<size_t>(backendCfg.numParallelGames* m_neuralNets.size()* backendCfg.queueScale * 2 + 512))
             , m_qFree(static_cast<size_t>(backendCfg.numParallelGames* m_neuralNets.size()* backendCfg.queueScale * 2 + 256))
             , m_qEval(static_cast<size_t>(backendCfg.numParallelGames* m_neuralNets.size()* backendCfg.queueScale * 2 + 256))
             , m_qBackprop(static_cast<size_t>(backendCfg.numParallelGames* m_neuralNets.size()* backendCfg.queueScale * 2 + 256))
@@ -174,19 +173,15 @@ namespace Core
                 m_qFree.push(m_eventPool.back().get());
             }
 
-            for (uint32_t i = 0; i < backendCfg.numSearchThreads; ++i) {
+            for (uint32_t i = 0; i < backendCfg.numSearchThreads; ++i)
                 m_workers.emplace_back(&ThreadPool::loopGather, this);
-            }
 
-            for (uint32_t g = 0; g < m_neuralNets.size(); ++g) {
-                for (uint32_t k = 0; k < backendCfg.numInferenceThreads; ++k) {
+            for (uint32_t g = 0; g < m_neuralNets.size(); ++g)
+                for (uint32_t k = 0; k < backendCfg.numInferenceThreads; ++k)
                     m_workers.emplace_back(&ThreadPool::loopInference, this, g, backendCfg.inferenceBatchSize);
-                }
-            }
 
-            for (uint32_t i = 0; i < backendCfg.numBackpropThreads; ++i) {
+            for (uint32_t i = 0; i < backendCfg.numBackpropThreads; ++i)
                 m_workers.emplace_back(&ThreadPool::loopBackprop, this);
-            }
         }
 
         ~ThreadPool()
@@ -197,26 +192,23 @@ namespace Core
             m_qEval.close(m_fastDrain);
             m_qBackprop.close(m_fastDrain);
 
-            for (auto& t : m_workers) {
+            for (auto& t : m_workers)
                 if (t.joinable()) t.join();
-            }
         }
 
         void executeMultipleTrees(const std::vector<TreeSearch<GT>*>& trees, uint32_t numSims)
         {
             if (trees.empty() || numSims == 0) return;
 
-            for (auto* tree : trees) {
+            for (auto* tree : trees)
                 tree->resetCounters();
-            }
 
             uint32_t totalSims = static_cast<uint32_t>(trees.size()) * numSims;
             m_pendingSimulations.store(totalSims, std::memory_order_release);
 
             bool isSelfPlay = (trees.size() > 1);
-            for (auto* tree : trees) {
+            for (auto* tree : trees)
                 m_qReadyTrees.push({ tree, numSims, isSelfPlay });
-            }
 
             std::unique_lock<std::mutex> lock(m_mainMutex);
             m_mainCV.wait(lock, [&]() {
@@ -230,9 +222,9 @@ namespace Core
         }
 
     private:
-        // ========================================================================
+        // ====================================================================
         // WORKER 1: Gather (Tree Traversal)
-        // ========================================================================
+        // ====================================================================
         void loopGather()
         {
             TreeTask tTask;
@@ -244,7 +236,8 @@ namespace Core
                 if (!m_qFree.pop(ctx))
                 {
                     m_starvationCount.fetch_add(1, std::memory_order_relaxed);
-                    std::cout << "[ThreadPool] Warning: Free context starvation! (Count: " << m_starvationCount.load() << ")\n";
+                    std::cerr << "[ThreadPool] Warning: Free context starvation! (count="
+                        << m_starvationCount.load() << ")\n";
                     break;
                 }
 
@@ -254,76 +247,78 @@ namespace Core
                     continue;
                 }
 
-                // ROUTEUR : En Inférence (!isSelfPlay), on permet l'exploration massive (Swarm)
-                if (!tTask.isSelfPlay && tTask.tree->getLaunchedCount() < tTask.targetSims) {
+                // Swarm mode: flood the queue in inference-only mode
+                if (!tTask.isSelfPlay && tTask.tree->getLaunchedCount() < tTask.targetSims)
                     m_qReadyTrees.push(tTask);
-                }
 
                 bool needEval = tTask.tree->gather(*ctx);
                 EvalTask eTask{ tTask.tree, ctx, tTask.targetSims, tTask.isSelfPlay };
 
-                if (needEval) {
-                    m_qEval.push(eTask);
-                }
-                else {
-                    m_qBackprop.push(eTask);
-                }
+                if (needEval) m_qEval.push(eTask);
+                else          m_qBackprop.push(eTask);
             }
         }
 
-        // ========================================================================
-        // WORKER 2: Inference (GPU Context Binding & Dynamic Batching)
-        // ========================================================================
-// ========================================================================
-        // WORKER 2: Inference (GPU Context Binding & Dynamic Batching)
-        // ========================================================================
+        // ====================================================================
+        // WORKER 2: Inference (GPU â€” Dynamic Batching)
+        // ====================================================================
         void loopInference(size_t gpuIdx, uint32_t configBatchSize)
         {
-            cudaError_t err = cudaSetDevice(static_cast<int>(gpuIdx));
-            if (err != cudaSuccess) {
-                std::cerr << "[ThreadPool] Fatal Error: Failed to bind thread to GPU " << gpuIdx << "!\n";
+            if (cudaSetDevice(static_cast<int>(gpuIdx)) != cudaSuccess) {
+                std::cerr << "[ThreadPool] Fatal: could not bind thread to GPU " << gpuIdx << "\n";
                 return;
             }
 
             auto& net = m_neuralNets[gpuIdx];
 
-            AlignedVec<EvalTask> batchTasks(reserve_only, configBatchSize);
-            AlignedVec<std::array<float, Defs::kNNInputSize>> batchInputs(reserve_only, configBatchSize);
-            AlignedVec<ModelResults> batchOutputs(reserve_only, configBatchSize);
+            AlignedVec<EvalTask>                                  batchTasks(reserve_only, configBatchSize);
+            AlignedVec<std::array<float, Defs::kNNInputSize>>     batchInputs(reserve_only, configBatchSize);
+            AlignedVec<ModelResults>                              batchOutputs(reserve_only, configBatchSize);
 
             while (m_running)
             {
                 batchTasks.clear();
 
-                // Dépilage classique basé strictement sur la configuration
-                size_t count = m_qEval.pop_batch(batchTasks, configBatchSize, std::chrono::microseconds(1000));
+                size_t count = m_qEval.pop_batch(batchTasks, configBatchSize,
+                    std::chrono::microseconds(1000));
                 if (count == 0) continue;
 
                 batchInputs.clear();
                 batchOutputs.resize(count);
 
-                for (const auto& task : batchTasks) {
+                for (const auto& task : batchTasks)
                     batchInputs.push_back(task.ctx->nnInput);
-                }
 
                 net->forwardBatch(batchInputs, batchOutputs);
 
-                for (size_t i = 0; i < count; ++i) {
+                for (size_t i = 0; i < count; ++i)
+                {
                     EvalTask& eTask = batchTasks[i];
                     Event* e = eTask.ctx;
-                    const auto& res = batchOutputs[i];
+                    const ModelResults& res = batchOutputs[i];
 
-                    for (size_t p = 0; p < Defs::kNumPlayers; ++p) {
+                    // ---------------------------------------------------------
+                    // FIX: copie EXACTEMENT kNumPlayers valeurs scalaires.
+                    //
+                    // ANCIENNE VERSION (BUG CRITIQUE) :
+                    //   std::copy_n(res.values.begin(), Defs::kNumPlayers * 3, e->wdlOutput.begin());
+                    //   â†’ res.values n'a que kNumPlayers Ã©lÃ©ments (2 pour chess).
+                    //   â†’ copier kNumPlayers*3 = 6 Ã©lÃ©ments lit 4 floats HORS BOUNDS
+                    //     dans res.policy â†’ corruption mÃ©moire â†’ thread crash â†’
+                    //     m_pendingSimulations ne redescend jamais Ã  0 â†’ hang infini.
+                    //
+                    // CORRECTION : revenir au format simple scalaire par joueur [-1, 1].
+                    // ---------------------------------------------------------
+                    for (size_t p = 0; p < Defs::kNumPlayers; ++p)
                         e->values[p] = res.values[p];
-                    }
 
+                    // Normalisation de la policy sur les coups lÃ©gaux uniquement
                     float sum = 0.0f;
                     for (const auto& act : e->validActions) {
                         uint32_t idx = m_engine->actionToIdx(act);
-                        if (idx < Defs::kActionSpace && idx < res.policy.size()) {
-                            float p = res.policy[idx];
-                            e->policy[idx] = p;
-                            sum += p;
+                        if (idx < Defs::kActionSpace) {
+                            e->policy[idx] = res.policy[idx];
+                            sum += res.policy[idx];
                         }
                     }
 
@@ -335,7 +330,7 @@ namespace Core
                         }
                     }
                     else if (!e->validActions.empty()) {
-                        float uniform = 1.0f / e->validActions.size();
+                        float uniform = 1.0f / static_cast<float>(e->validActions.size());
                         for (const auto& act : e->validActions) {
                             uint32_t idx = m_engine->actionToIdx(act);
                             if (idx < Defs::kActionSpace) e->policy[idx] = uniform;
@@ -347,9 +342,9 @@ namespace Core
             }
         }
 
-        // ========================================================================
-        // WORKER 3: Backpropagation (Updating the Tree & Removing Virtual Loss)
-        // ========================================================================
+        // ====================================================================
+        // WORKER 3: Backpropagation (Update tree + release virtual loss)
+        // ====================================================================
         void loopBackprop()
         {
             EvalTask eTask;
@@ -357,27 +352,21 @@ namespace Core
             {
                 if (!m_qBackprop.pop(eTask)) break;
 
-                // 1. EXTRACTION CRITIQUE : Lire l'état de collision AVANT de libérer le contexte
                 bool wasCollision = eTask.ctx->collision;
-
-                // 2. BACKPROP : Mettre à jour l'arbre (les collisions sont gérées à l'intérieur)
                 eTask.tree->backprop(*(eTask.ctx));
-
-                // 3. LIBÉRATION SÉCURISÉE : L'événement peut maintenant être réutilisé
                 m_qFree.push(eTask.ctx);
 
-                // 4. ROUTEUR HYBRIDE : Faut-il remettre l'arbre dans la boucle ?
-                //  - En Self-Play, on remet l'arbre TOUJOURS ici (pour garantir 1 thread max).
-                //  - En Inférence, on ne le remet ICI que s'il a crashé (Collision) et qu'on doit rattraper la simulation perdue.
-                if ((eTask.isSelfPlay || wasCollision) && eTask.tree->getLaunchedCount() < eTask.targetSims) {
+                // Re-inject tree into gather queue if it still needs simulations
+                if ((eTask.isSelfPlay || wasCollision)
+                    && eTask.tree->getLaunchedCount() < eTask.targetSims)
+                {
                     m_qReadyTrees.push({ eTask.tree, eTask.targetSims, eTask.isSelfPlay });
                 }
 
-                // 5. SYNCHRONISATION GLOBALE : Uniquement si la simulation était valide !
+                // Only decrement for valid (non-collision) simulations
                 if (!wasCollision) {
-                    if (m_pendingSimulations.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-                        m_mainCV.notify_all(); // Fin totale !
-                    }
+                    if (m_pendingSimulations.fetch_sub(1, std::memory_order_acq_rel) == 1)
+                        m_mainCV.notify_all();
                 }
             }
         }

@@ -617,16 +617,12 @@ namespace Core
     template<uint32_t NumPlayers>
     struct GameResult
     {
-        std::array<float, NumPlayers> scores{};
-        uint8_t reason = 0; // Game-specific termination code (0 = ongoing/none)
-
-        // Overload to allow MCTS to read/write identically to an array
-        [[nodiscard]] constexpr float operator[](size_t i) const noexcept { return scores[i]; }
-        constexpr float& operator[](size_t i) noexcept { return scores[i]; }
+        std::array<float, NumPlayers * 3> wdl{};
+        uint32_t reason = 0; // Game-specific termination code (0 = ongoing/none)
 
         // Maintains compatibility with std::array API used by Event::reset()
         constexpr void fill(float val) noexcept {
-            scores.fill(val);
+            wdl.fill(val);
             reason = 0;
         }
     };

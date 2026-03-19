@@ -23,14 +23,12 @@ namespace Core
     struct TrainingSample
     {
         USING_GAME_TYPES(GT);
-
         static constexpr size_t kMaskBytes = (Defs::kActionSpace + 7) / 8;
 
-        std::array<float, Defs::kNNInputSize> nnInput;
-        std::array<float, Defs::kActionSpace> policy;
-        std::array<float, Defs::kNumPlayers> result;
-
-        std::array<uint8_t, kMaskBytes> legalMovesMask;
+        std::array<float, Defs::kNNInputSize>    nnInput;
+        std::array<float, Defs::kActionSpace>    policy;
+        std::array<float, Defs::kNumPlayers * 3> wdlTarget;
+        std::array<uint8_t, kMaskBytes>          legalMovesMask;
     };
 
     #pragma pack(pop) // Remet le compilateur dans son mode normal
@@ -97,23 +95,17 @@ namespace Core
         void flushToFile(const GameResult& finalOutcome, std::ofstream& outFile)
         {
             if (m_samples.empty()) return;
-
             if (!outFile.good()) {
-                throw std::runtime_error("Fatal Error: ReplayBuffer cannot write to a corrupted or closed output stream.");
+                throw std::runtime_error("Fatal Error: ReplayBuffer stream closed.");
             }
 
-            // 1. Retroactively apply the true game result (Z) to every recorded step
-            for (auto& sample : m_samples)
-            {
-                // Assuming GameResult is a std::array or trivial type, assignment is safe
-                sample.result = finalOutcome.scores;
+            // On applique le WDL de fin de partie à tous les coups
+            for (auto& sample : m_samples) {
+                sample.wdlTarget = finalOutcome.wdl;
             }
 
-            // 2. Perform a massive, single-call binary DMA write to the disk
             outFile.write(reinterpret_cast<const char*>(m_samples.data()),
                 m_samples.size() * sizeof(TrainingSample<GT>));
-
-            // 3. Reset the buffer for the next game
             clear();
         }
 

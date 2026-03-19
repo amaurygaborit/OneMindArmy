@@ -43,24 +43,34 @@ namespace Core
         };
 
         // ------------------------------------------------------------------------
+        // POLICY EXTRACTION
+        // ------------------------------------------------------------------------
+        static inline float getPolicyMetric(const EdgeData& edge)
+        {
+            // The training policy target (Pi) is directly proportional to the visit counts
+            return static_cast<float>(edge.visitCount.load(std::memory_order_relaxed));
+        }
+
+        // À ajouter dans SearchStrategy.hpp côté StrategyPUCT
+        // (nécessaire pour getRootValue)
+        static float getQ(const EdgeData& e) {
+            float n = getPolicyMetric(e);
+            if (n < 1.0f) return 0.0f;
+            return e.totalValue.load(std::memory_order_relaxed) / n;
+        }
+
+        // ------------------------------------------------------------------------
         // PUCT ALGORITHM (Predictor Upper Confidence Bound)
         // Formula: Q(s, a) + cPUCT * P(s, a) * sqrt(N(s)) / (1 + N(s, a))
         // ------------------------------------------------------------------------
-        static inline float computeScore(const EdgeData& edge, uint32_t parentVisits, float prior, float cPUCT)
-        {
-            // Acquire semantics to read the most up-to-date values modified by other threads
-            uint32_t N = edge.visitCount.load(std::memory_order_acquire);
-            float Q = 0.0f;
+        static inline float computeScore(const EdgeData& edge, uint32_t parentVisits, float prior, float cPUCT, float fpuValue) {
+            uint32_t childVisits = getPolicyMetric(edge);
 
-            if (N > 0) {
-                Q = edge.totalValue.load(std::memory_order_acquire) / static_cast<float>(N);
-            }
+            // Si l'enfant n'a jamais été visité, on lui force le score du FPU
+            float q = (childVisits == 0) ? fpuValue : getQ(edge);
 
-            // U-Value (Exploration bonus based on the Neural Network's prior probability)
-            float U = cPUCT * prior * std::sqrt(static_cast<float>(parentVisits)) / (1.0f + static_cast<float>(N));
-
-            // Maximize Q + U (Values are always relative to the player making the move)
-            return Q + U;
+            float u = cPUCT * prior * (std::sqrt(parentVisits) / (1.0f + childVisits));
+            return q + u;
         }
 
         // ------------------------------------------------------------------------
@@ -93,23 +103,6 @@ namespace Core
         {
             edge.visitCount.fetch_sub(1, std::memory_order_relaxed);
             edge.totalValue.fetch_add(virtualLossPenalty, std::memory_order_relaxed);
-        }
-
-        // À ajouter dans SearchStrategy.hpp côté StrategyPUCT
-        // (nécessaire pour getRootValue)
-        static float getQ(const EdgeData& e) {
-            float n = static_cast<float>(e.visitCount.load(std::memory_order_relaxed));
-            if (n < 1.0f) return 0.0f;
-            return e.totalValue.load(std::memory_order_relaxed) / n;
-        }
-
-        // ------------------------------------------------------------------------
-        // POLICY EXTRACTION
-        // ------------------------------------------------------------------------
-        static inline float getPolicyMetric(const EdgeData& edge)
-        {
-            // The training policy target (Pi) is directly proportional to the visit counts
-            return static_cast<float>(edge.visitCount.load(std::memory_order_relaxed));
         }
     };
 }

@@ -81,7 +81,6 @@ def ema_smooth(values, alpha=0.99):
 
 def alpha_from_window(window: int) -> float:
     """Convert a 'smoothing window' count to an EMA alpha."""
-    # alpha such that the half-life ≈ window/2 steps
     return 1.0 - 2.0 / max(window + 1, 2)
 
 
@@ -123,6 +122,16 @@ def add_iteration_markers(ax, batch_records, show_iters):
                     fontsize=7, va="top")
 
 
+def _finish(fig, save_path):
+    if save_path:
+        fig.savefig(save_path, dpi=150, bbox_inches="tight",
+                    facecolor=fig.get_facecolor())
+        print(f"[Plot] Saved → {save_path}")
+    else:
+        plt.show()
+    plt.close(fig)
+
+
 # ==============================================================================
 # --- BATCH MODE ---
 # ==============================================================================
@@ -151,9 +160,9 @@ def plot_batch(batch_records, smooth_alpha, show_iters, save_path):
     # --- Panel 1: V-Loss & P-Loss ---
     ax = axes[0]
     ax.plot(steps, v_vals,  color=V_COLOR, alpha=ALPHA_RAW,    linewidth=0.6)
-    ax.plot(steps, v_smooth, color=V_COLOR, alpha=ALPHA_SMOOTH, linewidth=1.5, label="V-Loss (value MSE)")
+    ax.plot(steps, v_smooth, color=V_COLOR, alpha=ALPHA_SMOOTH, linewidth=1.5, label="V-Loss (WDL Cross-Entropy)")
     ax.plot(steps, p_vals,  color=P_COLOR, alpha=ALPHA_RAW,    linewidth=0.6)
-    ax.plot(steps, p_smooth, color=P_COLOR, alpha=ALPHA_SMOOTH, linewidth=1.5, label="P-Loss (policy CE)")
+    ax.plot(steps, p_smooth, color=P_COLOR, alpha=ALPHA_SMOOTH, linewidth=1.5, label="P-Loss (Policy Cross-Entropy)")
     ax.set_ylabel("Loss")
     ax.set_title("Value Loss & Policy Loss")
     ax.legend(loc="upper right")
@@ -162,13 +171,18 @@ def plot_batch(batch_records, smooth_alpha, show_iters, save_path):
     # --- Panel 2: Total Loss & Grad Norm ---
     ax = axes[1]
     ax2 = ax.twinx()
+    
+    # Trace first, legend after
     ax.plot(steps, t_vals,  color=T_COLOR, alpha=ALPHA_RAW,    linewidth=0.6)
     ax.plot(steps, t_smooth, color=T_COLOR, alpha=ALPHA_SMOOTH, linewidth=1.5, label="Total Loss")
     ax2.plot(steps, norms, color="#9966cc", alpha=0.35, linewidth=0.7, label="Grad Norm")
+    
     ax.set_ylabel("Total Loss", color=T_COLOR)
     ax2.set_ylabel("Grad Norm",  color="#9966cc")
     ax2.tick_params(axis="y", labelcolor="#9966cc")
     ax.set_title("Total Loss & Gradient Norm")
+    
+    # Legend correctly placed after drawing
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
@@ -233,20 +247,6 @@ def plot_epoch(epoch_records, show_iters, save_path):
     ax.legend(loc="upper left")
 
     _finish(fig, save_path)
-
-
-# ==============================================================================
-# --- FINISH ---
-# ==============================================================================
-
-def _finish(fig, save_path):
-    if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight",
-                    facecolor=fig.get_facecolor())
-        print(f"[Plot] Saved → {save_path}")
-    else:
-        plt.show()
-    plt.close(fig)
 
 
 # ==============================================================================

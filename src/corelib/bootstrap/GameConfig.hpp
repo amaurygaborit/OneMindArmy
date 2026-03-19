@@ -82,6 +82,7 @@ namespace Core
         float    dirichletAlpha;
         float    dirichletEpsilon;
         uint32_t temperatureDrop;
+		float    fpuValue;
         uint32_t maxNodes;
         float    memoryThreshold;
         bool     reuseTree;
@@ -100,6 +101,7 @@ namespace Core
             dirichletAlpha = loadVal<float>(node, "dirichletAlpha", 0.0f, 100.0f); // Peut �tre 0.0 en match
             dirichletEpsilon = loadVal<float>(node, "dirichletEpsilon", 0.0f, 1.0f);
             temperatureDrop = loadVal<uint32_t>(node, "temperatureDrop", 0u, 1000u);
+			fpuValue = loadVal<float>(node, "fpuValue", -100.0f, 100.0f);
             maxNodes = loadVal<uint32_t>(node, "maxNodes", 1000u, UINT32_MAX);
             memoryThreshold = loadVal<float>(node, "memoryThreshold", 0.1f, 1.0f);
             reuseTree = loadVal<bool>(node, "reuseTree", false, true);
@@ -119,6 +121,7 @@ namespace Core
         float learningRate = 0.0f;
         float weightDecay = 0.0f;
         float valueLossWeight = 0.0f;
+		uint32_t currentIteration = 0;
 
         void load(const YAML::Node& root, const std::string& runMode)
         {
@@ -136,6 +139,7 @@ namespace Core
             learningRate = loadVal<float>(node, "learningRate", 0.0000001f, 1.0f);
             weightDecay = loadVal<float>(node, "weightDecay", 0.0f, 1.0f);
             valueLossWeight = loadVal<float>(node, "valueLossWeight", 0.0f, 10.0f);
+			currentIteration = loadVal<uint32_t>(node, "currentIteration", 0u, UINT32_MAX);
         }
     };
 

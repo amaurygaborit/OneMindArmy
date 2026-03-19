@@ -10,10 +10,11 @@ engine:
   maxDepth: 128
 
   cPUCT: 1.5
+  virtualLoss: 2.0         # Lower penalty needed for single game
   dirichletAlpha: 0.0      # EXPLORATION OFF (Competitive play)
   dirichletEpsilon: 0.0    # EXPLORATION OFF
   temperatureDrop: 0       # Always play the best move (temp ~0)
-  virtualLoss: 2.0         # Lower penalty needed for single game
+  fpuValue: 0.0            # Assume unknown moves are neutral instead of bad
 
   maxNodes: 2000           # Allow the tree to grow huge for one game
   memoryThreshold: 0.90

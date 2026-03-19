@@ -48,8 +48,8 @@ namespace Core
     struct ModelResultsT
     {
         USING_GAME_TYPES(GT);
-        std::array<float, Defs::kNumPlayers> values{};
         std::array<float, Defs::kActionSpace> policy{};
+        std::array<float, Defs::kNumPlayers * 3> values{};
 
         ModelResultsT() noexcept = default;
     };

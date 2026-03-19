@@ -19,7 +19,6 @@ namespace Core
 {
     // ========================================================================
     // ATOMIC WRAPPER
-    // Allows primitive types to be used atomically inside STL containers.
     // ========================================================================
     template<typename T>
     struct AtomicVal {
@@ -43,7 +42,6 @@ namespace Core
         AlignedVec<Action>   pathActions;
         AlignedVec<uint64_t> pathHashes;
 
-        // The pre-encoded, zero-copy Neural Network input array
         std::array<float, Defs::kNNInputSize> nnInput{};
 
         bool isTerminal;
@@ -51,9 +49,10 @@ namespace Core
 
         ActionList validActions;
 
-        // Neural Network outputs mapping (Safely zero-initialized)
+        // --- MODIFICATIONS WDL ---
         std::array<float, Defs::kActionSpace> policy{};
-        GameResult values{};
+        std::array<float, Defs::kNumPlayers * 3> wdlOutput{};
+        GameResult trueOutcome{};
 
         explicit NodeEvent(uint32_t maxDepth)
             : leafNodeIdx(0)
@@ -72,7 +71,8 @@ namespace Core
             validActions.clear();
 
             policy.fill(0.0f);
-            values.fill(0.0f);
+            wdlOutput.fill(0.0f);
+            trueOutcome.fill(0.0f);
 
             isTerminal = false;
             collision = false;
@@ -92,7 +92,6 @@ namespace Core
         using Strategy = StrategyPUCT;
         using EdgeData = typename Strategy::EdgeData;
 
-        // Node Lifecycle Flags
         static constexpr uint8_t FLAG_NONE = 0x00;
         static constexpr uint8_t FLAG_EXPANDING = 0x01;
         static constexpr uint8_t FLAG_EXPANDED = 0x02;
@@ -101,7 +100,6 @@ namespace Core
         const EngineConfig m_config;
         std::shared_ptr<IEngine<GT>> m_engine;
 
-        // Flattened tree structure optimized for contiguous cache locality
         AlignedVec<AtomicVal<uint8_t>>  m_nodeFlags;
         AlignedVec<AtomicVal<uint16_t>> m_nodeNumChildren;
         AlignedVec<uint32_t> m_nodeFirstChild;
@@ -116,29 +114,20 @@ namespace Core
 
         std::atomic<uint32_t> m_nodeCount{ 0 };
 
-        // Multi-threading synchronization counters
         std::atomic<uint32_t> m_simulationsLaunched{ 0 };
         std::atomic<uint32_t> m_simulationsFinished{ 0 };
 
-        // --------------------------------------------------------------------
-        // Internal Allocator
-        // --------------------------------------------------------------------
         uint32_t allocNodes(uint32_t count) {
             uint32_t idx = m_nodeCount.fetch_add(count, std::memory_order_relaxed);
             return (idx + count > m_config.maxNodes) ? UINT32_MAX : idx;
         }
 
-        // --------------------------------------------------------------------
-        // Network Payload Preparation & POV Alignment
-        // --------------------------------------------------------------------
         void prepareNodeInput(Event& ctx, const State& leafState) {
             uint32_t viewer = m_engine->getCurrentPlayer(leafState);
 
-            // 1. Shift the state perspective
             State povState = leafState;
             m_engine->changeStatePov(viewer, povState);
 
-            // 2. Extract the sliding window of history
             size_t totalNeeded = Defs::kMaxHistory;
             size_t realCount = m_realHistory.size();
             size_t pathCount = ctx.pathActions.size();
@@ -163,7 +152,6 @@ namespace Core
                 povHistory.push_back(a);
             }
 
-            // 3. Immediately encode to float array for TensorRT
             ctx.nnInput = StateEncoder<GT>::encode(povState, povHistory);
         }
 
@@ -173,9 +161,6 @@ namespace Core
             outFullHistory.insert(outFullHistory.end(), pathHashes.begin(), pathHashes.end());
         }
 
-        // --------------------------------------------------------------------
-        // Exploration (Dirichlet Noise Injection)
-        // --------------------------------------------------------------------
         void applyDirichletNoise(uint32_t startIdx, uint32_t nChildren) {
             thread_local std::mt19937 rng(std::random_device{}());
             std::gamma_distribution<float> gamma(m_config.dirichletAlpha, 1.0f);
@@ -227,13 +212,8 @@ namespace Core
             return m_simulationsLaunched.fetch_add(1, std::memory_order_relaxed) + 1;
         }
 
-        [[nodiscard]] uint32_t getLaunchedCount() const {
-            return m_simulationsLaunched.load(std::memory_order_relaxed);
-        }
-
-        [[nodiscard]] uint32_t getSimulationCount() const {
-            return m_simulationsFinished.load(std::memory_order_relaxed);
-        }
+        [[nodiscard]] uint32_t getLaunchedCount() const { return m_simulationsLaunched.load(std::memory_order_relaxed); }
+        [[nodiscard]] uint32_t getSimulationCount() const { return m_simulationsFinished.load(std::memory_order_relaxed); }
 
         void startSearch(const State& rootState, std::span<const uint64_t> currentHistory) {
             m_nodeCount.store(0, std::memory_order_relaxed);
@@ -251,7 +231,7 @@ namespace Core
         }
 
         // --------------------------------------------------------------------
-        // PHASE 1: GATHER (Traverse tree, apply Virtual Loss, prepare Neural input)
+        // PHASE 1: GATHER
         // --------------------------------------------------------------------
         bool gather(Event& ctx) {
             ctx.reset();
@@ -272,28 +252,25 @@ namespace Core
                 if (flags & FLAG_TERMINAL) {
                     ctx.isTerminal = true;
                     ctx.leafNodeIdx = currIdx;
-
                     buildFullHashHistory(ctx.pathHashes, fullHashHistory);
                     if (auto outcome = m_engine->getGameResult(currState, fullHashHistory)) {
-                        ctx.values = *outcome;
+                        ctx.trueOutcome = *outcome;
                     }
                     else {
-                        ctx.values.fill(0.0f);
+                        ctx.trueOutcome.fill(0.0f);
                     }
                     return false;
                 }
 
                 if (!(flags & FLAG_EXPANDED)) {
                     uint8_t expected = FLAG_NONE;
-
-                    // Attempt to lock the node for expansion
                     if (m_nodeFlags[currIdx].val.compare_exchange_strong(expected, FLAG_EXPANDING, std::memory_order_acquire)) {
                         ctx.leafNodeIdx = currIdx;
                         buildFullHashHistory(ctx.pathHashes, fullHashHistory);
 
                         if (auto outcome = m_engine->getGameResult(currState, fullHashHistory)) {
                             ctx.isTerminal = true;
-                            ctx.values = *outcome;
+                            ctx.trueOutcome = *outcome;
                             m_nodeFlags[currIdx].val.store(FLAG_TERMINAL | FLAG_EXPANDED, std::memory_order_release);
                             return false;
                         }
@@ -301,18 +278,14 @@ namespace Core
                         ctx.isTerminal = false;
                         prepareNodeInput(ctx, currState);
                         ctx.validActions = m_engine->getValidActions(currState, fullHashHistory);
-
-                        return true; // Node needs GPU evaluation
+                        return true;
                     }
                     else {
-                        // Another thread just finished expanding it
                         if (expected & FLAG_EXPANDED) continue;
-
-                        // Collision: Prevent deadlock by throwing the collision flag
                         ctx.collision = true;
                         ctx.isTerminal = true;
                         ctx.leafNodeIdx = currIdx;
-                        ctx.values.fill(0.0f);
+                        ctx.trueOutcome.fill(0.0f);
                         return false;
                     }
                 }
@@ -322,7 +295,7 @@ namespace Core
                 if (nChildren == 0) {
                     ctx.isTerminal = true;
                     ctx.leafNodeIdx = currIdx;
-                    ctx.values.fill(0.0f);
+                    ctx.trueOutcome.fill(0.0f);
                     return false;
                 }
 
@@ -334,7 +307,8 @@ namespace Core
 
                 for (uint32_t i = 0; i < nChildren; ++i) {
                     uint32_t cIdx = firstChild + i;
-                    float score = Strategy::computeScore(m_nodeEdges[cIdx], parentVisits, m_nodePrior[cIdx], m_config.cPUCT);
+                    // INJECTION DU FPU ICI !
+                    float score = Strategy::computeScore(m_nodeEdges[cIdx], parentVisits, m_nodePrior[cIdx], m_config.cPUCT, m_config.fpuValue);
                     if (score > bestScore) {
                         bestScore = score;
                         bestChild = cIdx;
@@ -343,9 +317,7 @@ namespace Core
 
                 const Action& action = m_nodeAction[bestChild];
 
-                // Multi-threading core mechanic: Dynamic Penalty
                 Strategy::applyVirtualLoss(m_nodeEdges[bestChild], m_config.virtualLoss);
-
                 m_engine->applyAction(action, currState);
 
                 ctx.pathHashes.push_back(currState.hash());
@@ -357,19 +329,18 @@ namespace Core
                 if (++depth >= m_config.maxDepth) {
                     ctx.isTerminal = true;
                     ctx.leafNodeIdx = currIdx;
-                    ctx.values.fill(0.0f);
+                    ctx.trueOutcome.fill(0.0f);
                     return false;
                 }
             }
         }
 
         // --------------------------------------------------------------------
-        // PHASE 2: BACKPROPAGATION (Update Tree, Remove VL, Add Noise)
+        // PHASE 2: BACKPROPAGATION
         // --------------------------------------------------------------------
         void backprop(const Event& ctx) {
             uint32_t leaf = ctx.leafNodeIdx;
 
-            // Expand the node only if no collision occurred
             if (!ctx.collision) {
                 uint8_t flags = m_nodeFlags[leaf].val.load(std::memory_order_relaxed);
 
@@ -390,7 +361,6 @@ namespace Core
                                 m_nodeFlags[startIdx + i].val.store(FLAG_NONE, std::memory_order_relaxed);
                             }
 
-                            // Inject Exploration Noise if this is the Root Node
                             if (leaf == m_rootIdx && m_config.dirichletEpsilon > 0.0f) {
                                 applyDirichletNoise(startIdx, nChildren);
                             }
@@ -406,7 +376,17 @@ namespace Core
                 }
             }
 
-            // Always backpropagate the values and resolve virtual losses
+            // --- CONVERSION WDL -> SCALAIRE ---
+            std::array<float, Defs::kNumPlayers> scalarValues{};
+            for (size_t p = 0; p < Defs::kNumPlayers; ++p) {
+                if (ctx.isTerminal) {
+                    scalarValues[p] = ctx.trueOutcome.wdl[p * 3 + 0] - ctx.trueOutcome.wdl[p * 3 + 2];
+                }
+                else {
+                    scalarValues[p] = ctx.wdlOutput[p * 3 + 0] - ctx.wdlOutput[p * 3 + 2];
+                }
+            }
+
             for (int i = (int)ctx.path.size() - 1; i >= 1; --i) {
                 uint32_t nodeIdx = ctx.path[i];
                 uint32_t playerWhoMoved = ctx.pathActions[i - 1].ownerId();
@@ -414,18 +394,13 @@ namespace Core
                 Strategy::removeVirtualLoss(m_nodeEdges[nodeIdx], m_config.virtualLoss);
 
                 if (!ctx.collision && playerWhoMoved < Defs::kNumPlayers) {
-                    float playerValue = ctx.values[playerWhoMoved];
+                    float playerValue = scalarValues[playerWhoMoved];
                     Strategy::update(m_nodeEdges[nodeIdx], playerValue);
                 }
             }
 
-            // Gestion des compteurs de synchronisation
-            if (ctx.collision) {
-                m_simulationsLaunched.fetch_sub(1, std::memory_order_relaxed);
-            }
-            else {
-                m_simulationsFinished.fetch_add(1, std::memory_order_release);
-            }
+            if (ctx.collision) m_simulationsLaunched.fetch_sub(1, std::memory_order_relaxed);
+            else m_simulationsFinished.fetch_add(1, std::memory_order_release);
         }
 
         // --------------------------------------------------------------------
@@ -480,6 +455,7 @@ namespace Core
                 sum += w;
             }
 
+            // Température proche de 0 (Exploitation pure : on prend le max de visites)
             if (temperature < 1e-3f) {
                 double maxVal = -1.0;
                 uint32_t bestIdx = 0;
@@ -492,6 +468,7 @@ namespace Core
                 return m_nodeAction[start + bestIdx];
             }
 
+            // Température > 0 (Exploration : tirage probabiliste selon les visites pondérées)
             thread_local std::mt19937 gen(std::random_device{}());
             std::uniform_real_distribution<double> dist(0.0, sum);
 
@@ -502,69 +479,43 @@ namespace Core
                 run += weights[i];
                 if (run >= val) return m_nodeAction[start + i];
             }
+
+            // Fallback de sécurité (arrondi float)
             return m_nodeAction[start + num - 1];
         }
 
-        // ------------------------------------------------------------------
-        // getRootValue()
-        //
-        // Retourne le Q-value du root du point de vue du joueur courant,
-        // i.e. la valeur estimée de la position actuelle pour le joueur
-        // qui doit jouer.
-        //
-        // Méthode : moyenne pondérée par les visites des Q-values de tous
-        // les enfants du root. Chaque edge enfant stocke la valeur accumulée
-        // pour le joueur qui a joué depuis le root (= le joueur courant),
-        // car backprop fait : Strategy::update(edge[path[i]], values[playerWhoMoved])
-        // avec playerWhoMoved = pathActions[i-1].ownerId() = le joueur du root.
-        //
-        // On préfère la moyenne pondérée au Q du meilleur enfant car elle est
-        // plus stable en début de recherche (peu de simulations).
-        // ------------------------------------------------------------------
         [[nodiscard]] float getRootValue() const
         {
-            if (m_rootIdx == UINT32_MAX)
-                return 0.0f;
-
+            if (m_rootIdx == UINT32_MAX) return 0.0f;
             uint32_t num = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
-            if (num == 0)
-                return 0.0f;
+            if (num == 0) return 0.0f;
 
             uint32_t start = m_nodeFirstChild[m_rootIdx];
-
             float total_weighted_q = 0.0f;
             float total_visits = 0.0f;
 
-            for (uint32_t i = 0; i < num; ++i)
-            {
-                float visits = static_cast<float>(
-                    Strategy::getPolicyMetric(m_nodeEdges[start + i]));
+            for (uint32_t i = 0; i < num; ++i) {
+                float visits = static_cast<float>(Strategy::getPolicyMetric(m_nodeEdges[start + i]));
                 float q = Strategy::getQ(m_nodeEdges[start + i]);
 
                 total_weighted_q += visits * q;
                 total_visits += visits;
             }
 
-            // Pas encore assez de simulations pour avoir une estimation fiable
-            if (total_visits < 1.0f)
-                return 0.0f;
-
+            if (total_visits < 1.0f) return 0.0f;
             return total_weighted_q / total_visits;
         }
 
         [[nodiscard]] std::array<float, Defs::kActionSpace> getRootPolicy() const {
             std::array<float, Defs::kActionSpace> pol{};
             if (m_rootIdx == UINT32_MAX) return pol;
-
             uint32_t num = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
             if (num == 0) return pol;
 
             uint32_t start = m_nodeFirstChild[m_rootIdx];
-
             for (uint32_t i = 0; i < num; ++i) {
                 float visits = static_cast<float>(Strategy::getPolicyMetric(m_nodeEdges[start + i]));
                 uint32_t actionId = m_engine->actionToIdx(m_nodeAction[start + i]);
-
                 if (actionId < Defs::kActionSpace) {
                     pol[actionId] += visits;
                 }
@@ -575,17 +526,13 @@ namespace Core
         [[nodiscard]] std::array<bool, Defs::kActionSpace> getRootLegalMovesMask() const {
             std::array<bool, Defs::kActionSpace> mask{};
             mask.fill(false);
-
             if (m_rootIdx == UINT32_MAX) return mask;
-
             uint32_t num = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
             if (num == 0) return mask;
 
             uint32_t start = m_nodeFirstChild[m_rootIdx];
-
             for (uint32_t i = 0; i < num; ++i) {
                 uint32_t actionId = m_engine->actionToIdx(m_nodeAction[start + i]);
-
                 if (actionId < Defs::kActionSpace) {
                     mask[actionId] = true;
                 }

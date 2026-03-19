@@ -16,10 +16,11 @@ engine:
   maxDepth: 128
 
   cPUCT: 1.5
+  virtualLoss: 0.0
   dirichletAlpha: 0.3
   dirichletEpsilon: 0.25
-  temperatureDrop: 30
-  virtualLoss: 0.0
+  temperatureDrop: 80
+  fpuValue: 1.5
 
   maxNodes: 1000
   memoryThreshold: 0.90
