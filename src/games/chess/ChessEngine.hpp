@@ -29,6 +29,7 @@ namespace Chess
         ActionList getValidActions(const State& state, std::span<const uint64_t> hashHistory) const override;
         bool isValidAction(const State& state, std::span<const uint64_t> hashHistory, const Action& action) const override;
         std::optional<GameResult> getGameResult(const State& state, std::span<const uint64_t> hashHistory) const override;
+        GameResult buildResignResult(uint32_t losingPlayer) const override;
 
         void changeStatePov(uint32_t viewer, State& outState) const override;
         void changeActionPov(uint32_t viewer, Action& outAction) const override;

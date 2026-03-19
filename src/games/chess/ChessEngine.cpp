@@ -398,6 +398,30 @@ namespace Chess
 		return std::nullopt;
 	}
 
+	GameResult ChessEngine::buildResignResult(uint32_t losingPlayer) const
+	{
+		// Format WDL : pour chaque joueur p, 3 floats consécutifs :
+		//   scores[p*3 + 0] = P(Win)
+		//   scores[p*3 + 1] = P(Draw)
+		//   scores[p*3 + 2] = P(Loss)
+		//
+		// Le joueur qui résigne a perdu avec certitude  → {0, 0, 1}
+		// Les autres joueurs ont gagné avec certitude   → {1, 0, 0}
+
+		std::array<float, Defs::kNumPlayers * 3> scores{};  // zero-init
+
+		for (size_t p = 0; p < Defs::kNumPlayers; ++p)
+		{
+			if (p == losingPlayer)
+				scores[p * 3 + 2] = 1.0f;  // Loss = 1
+			else
+				scores[p * 3 + 0] = 1.0f;  // Win  = 1
+			// Draw reste à 0 dans les deux cas
+		}
+
+		return GameResult{ scores, static_cast<uint32_t>(ChessEndReason::Resigned) };
+	}
+
 	void ChessEngine::changeStatePov(uint32_t viewer, State& outState) const
 	{
 		for (uint32_t idx = 0; idx < Defs::kMaxElems; ++idx)

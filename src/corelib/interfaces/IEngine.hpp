@@ -88,7 +88,8 @@ namespace Core
         ///          GameResult with scores — game is over; scores[i] ∈ [−1, +1]
         ///          for player i (e.g. +1 = win, 0 = draw, −1 = loss).
         [[nodiscard]] virtual std::optional<GameResult> getGameResult(const State& state, std::span<const uint64_t> hashHistory) const = 0;
-        
+        [[nodiscard]] virtual GameResult buildResignResult(uint32_t losingPlayer) const = 0;
+
         // -------------------------------------------------------------------
         // 3. STATE MUTATION
         // -------------------------------------------------------------------
