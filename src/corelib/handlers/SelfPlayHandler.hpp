@@ -143,7 +143,7 @@ namespace Core
             const uint32_t target = m_trainingCfg.gamesPerIteration;
 
             std::cout
-                << "[SelfPlay] Starting     : " << target << " games to write\n"
+                << "[SelfPlay] Starting      : " << target << " games to write\n"
                 << "[SelfPlay] File          : " << m_datasetPath << "\n"
                 << "[SelfPlay] Parallelism   : " << m_backendCfg.numParallelGames
                 << " games | Batch: " << m_backendCfg.inferenceBatchSize << "\n"

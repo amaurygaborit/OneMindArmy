@@ -29,7 +29,7 @@ engine:
   resignMinPly: 30
 
 training:
-  gamesPerIteration: 10000
+  gamesPerIteration: 5000
   slidingWindowSamples: 6000000
   maxWindowIterations: 10
 
