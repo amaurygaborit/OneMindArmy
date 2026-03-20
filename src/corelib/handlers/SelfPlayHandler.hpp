@@ -48,7 +48,6 @@ namespace Core
         BackendConfig  m_backendCfg;
         TrainingConfig m_trainingCfg;
         std::string    m_datasetPath = "";
-        float          m_drawSampleRate = 1.0f;
 
         void specificSetup(const YAML::Node& config) override
         {
@@ -66,9 +65,6 @@ namespace Core
             oss << dataFolder << "/iteration_"
                 << std::setw(4) << std::setfill('0') << m_trainingCfg.currentIteration << ".bin";
             m_datasetPath = oss.str();
-
-            if (config["training"] && config["training"]["drawSampleRate"])
-                m_drawSampleRate = config["training"]["drawSampleRate"].as<float>();
         }
 
         void resetGame(GameContext& g)
@@ -166,10 +162,10 @@ namespace Core
             else
                 std::cout << "[SelfPlay] Resign        : disabled\n";
 
-            if (m_drawSampleRate < 1.0f)
-                std::cout << "[SelfPlay] Draw filter   : " << m_drawSampleRate * 100.f
+            if (m_trainingCfg.drawSampleRate < 1.0f)
+                std::cout << "[SelfPlay] Draw filter   : " << m_trainingCfg.drawSampleRate * 100.f
                 << "% kept (iteration will be ~"
-                << std::fixed << std::setprecision(1) << (1.0f / m_drawSampleRate)
+                << std::fixed << std::setprecision(1) << (1.0f / m_trainingCfg.drawSampleRate)
                 << "x longer)\n";
             else
                 std::cout << "[SelfPlay] Draw filter   : disabled\n";
@@ -279,7 +275,7 @@ namespace Core
                             gamesPlayed++;
 
                             const bool written = g.replayBuffer.flushToFile(
-                                outcome.value(), outFile, m_drawSampleRate);
+                                outcome.value(), outFile, m_trainingCfg.drawSampleRate);
 
                             if (written) {
                                 writtenMoves += g.turnCount;
