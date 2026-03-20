@@ -11,9 +11,8 @@ engine:
 
   cPUCT: 1.5
   virtualLoss: 2.0         # Lower penalty needed for single game
-  dirichletAlpha: 0.0      # EXPLORATION OFF (Competitive play)
-  dirichletEpsilon: 0.0    # EXPLORATION OFF
-  temperatureDrop: 0       # Always play the best move (temp ~0)
+  gumbelK: 0              # top-k actions gardées à la racine (0 = Dirichlet classique)
+  gumbelSigma: 0.0        # température pour la policy améliorée (0 = visit counts classiques)
   fpuValue: 0.0            # Assume unknown moves are neutral instead of bad
 
   maxNodes: 2000           # Allow the tree to grow huge for one game

@@ -36,13 +36,13 @@ namespace Core
     // ========================================================================
     // NODE EVENT
     //
-    // WDL LAYOUT: for each player p, 3 consecutive floats:
+    // WDL layout: for each player p, 3 consecutive floats:
     //   [p*3+0] = P(Win), [p*3+1] = P(Draw), [p*3+2] = P(Loss)
     //
-    //   nnWDL   : filled by GPU inference
-    //   trueWDL : filled from GameResult::wdl for terminal nodes
+    // nnWDL   : GPU inference output
+    // trueWDL : exact outcome for terminal nodes (from GameResult::wdl)
     //
-    // Scalar for PUCT/backprop: W - L = [p*3+0] - [p*3+2]  ∈ [-1, +1]
+    // Scalar for PUCT / backprop: W - L = [p*3+0] - [p*3+2]  ∈ [-1, +1]
     // ========================================================================
     template<ValidGameTraits GT>
     struct NodeEvent
@@ -88,7 +88,7 @@ namespace Core
             collision = false;
         }
 
-        // W - L ∈ [-1, +1] for player p.
+        // W - L ∈ [-1, +1] for player p
         [[nodiscard]] float scalarValue(size_t p, bool fromNN) const noexcept
         {
             const auto& wdl = fromNN ? nnWDL : trueWDL;
@@ -99,14 +99,15 @@ namespace Core
     // ========================================================================
     // MONTE CARLO TREE SEARCH (Lock-Free Asynchronous)
     //
-    // Gumbel extensions (compatible with the async parallel pipeline):
+    // Root exploration uses Gumbel-Top-K exclusively.
+    // dirichletAlpha / dirichletEpsilon are no longer used.
     //
-    //  1. applyGumbelTopK() is called instead of applyDirichletNoise()
-    //     at the root. Controlled by gumbelK in EngineConfig (0 = disabled).
+    // Policy target uses computeImprovedPolicy (completed Q-values) when
+    // gumbelSigma > 0, raw visit counts otherwise.
     //
-    //  2. getRootPolicy() uses computeImprovedPolicy() to produce a better
-    //     training target via completed Q-values. Controlled by gumbelSigma
-    //     in EngineConfig (0 = raw visit counts, classic AlphaZero).
+    // Temperature for move selection is always 1.0 during self-play
+    // (exploration is handled by Gumbel at the root, not by temperature).
+    // During inference, temperature is passed explicitly by InferenceHandler.
     // ========================================================================
     template<ValidGameTraits GT>
     class TreeSearch
@@ -152,8 +153,7 @@ namespace Core
         void prepareNodeInput(Event& ctx, const State& leafState)
         {
             uint32_t viewer = m_engine->getCurrentPlayer(leafState);
-
-            State povState = leafState;
+            State    povState = leafState;
             m_engine->changeStatePov(viewer, povState);
 
             const size_t totalNeeded = Defs::kMaxHistory;
@@ -164,7 +164,6 @@ namespace Core
             size_t processed = 0;
 
             AlignedVec<Action> povHistory(reserve_only, totalNeeded);
-
             for (size_t i = 0; i < realCount; ++i) {
                 if (processed >= startIdx || (realCount - i + pathCount) <= totalNeeded) {
                     Action a = m_realHistory[i];
@@ -178,7 +177,6 @@ namespace Core
                 m_engine->changeActionPov(viewer, a);
                 povHistory.push_back(a);
             }
-
             ctx.nnInput = StateEncoder<GT>::encode(povState, povHistory);
         }
 
@@ -192,46 +190,24 @@ namespace Core
         }
 
         // ----------------------------------------------------------------
-        // Root exploration — Gumbel-Top-K if gumbelK > 0, Dirichlet otherwise.
-        // Only called on the root node (leaf == m_rootIdx in backprop).
+        // Root exploration — Gumbel-Top-K only.
+        //
+        // Dirichlet noise is removed: it was a uniform perturbation that
+        // added noise independently of the policy quality. Gumbel-Top-K
+        // is strictly superior: it selects candidates proportionally to
+        // the prior, so strong moves are more likely to be explored.
+        //
+        // If gumbelK == 0 (disabled in config), no exploration is applied
+        // at the root (pure exploitation — useful for evaluation games).
         // ----------------------------------------------------------------
         void applyRootExploration(uint32_t startIdx, uint32_t nChildren)
         {
-            if (nChildren == 0) return;
+            if (nChildren == 0 || m_config.gumbelK == 0) return;
 
-            const uint32_t k = m_config.gumbelK;
-
-            if (k > 0) {
-                // ---- Gumbel-Top-K ----
-                // More principled than Dirichlet: exploration is proportional
-                // to the policy prior rather than uniform noise.
-                Strategy::applyGumbelTopK(
-                    startIdx, nChildren,
-                    m_nodePrior.data(),   // priors modified in-place
-                    k);
-            }
-            else if (m_config.dirichletEpsilon > 0.0f) {
-                // ---- Classic Dirichlet (fallback when gumbelK = 0) ----
-                thread_local std::mt19937 rng{ std::random_device{}() };
-                std::gamma_distribution<float> gamma(m_config.dirichletAlpha, 1.0f);
-
-                float sum = 0.0f;
-                std::vector<float> noise(nChildren);
-                for (uint32_t i = 0; i < nChildren; ++i) {
-                    noise[i] = gamma(rng);
-                    sum += noise[i];
-                }
-
-                if (sum > 1e-9f) {
-                    const float invSum = 1.0f / sum;
-                    const float eps = m_config.dirichletEpsilon;
-                    for (uint32_t i = 0; i < nChildren; ++i) {
-                        float n = noise[i] * invSum;
-                        float p = m_nodePrior[startIdx + i];
-                        m_nodePrior[startIdx + i] = (1.0f - eps) * p + eps * n;
-                    }
-                }
-            }
+            Strategy::applyGumbelTopK(
+                startIdx, nChildren,
+                m_nodePrior.data(),
+                m_config.gumbelK);
         }
 
         // ----------------------------------------------------------------
@@ -421,7 +397,6 @@ namespace Core
                                 m_nodeFlags[startIdx + i].val.store(FLAG_NONE, std::memory_order_relaxed);
                             }
 
-                            // Root exploration: Gumbel-Top-K or Dirichlet
                             if (leaf == m_rootIdx)
                                 applyRootExploration(startIdx, nChildren);
 
@@ -438,7 +413,6 @@ namespace Core
                 }
             }
 
-            // W - L scalar per player
             std::array<float, Defs::kNumPlayers> scalars{};
             for (size_t p = 0; p < Defs::kNumPlayers; ++p)
                 scalars[p] = ctx.scalarValue(p, /*fromNN=*/!ctx.isTerminal);
@@ -479,9 +453,10 @@ namespace Core
                             m_rootState = newState;
                             resetCounters();
                             reused = true;
-                            // Re-apply root exploration on the new root
-                            uint32_t ns = m_nodeFirstChild[m_rootIdx];
-                            uint32_t nn = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
+                            // Re-apply Gumbel on the new root
+                            const uint32_t ns = m_nodeFirstChild[m_rootIdx];
+                            const uint32_t nn = m_nodeNumChildren[m_rootIdx].val.load(
+                                std::memory_order_relaxed);
                             if (nn > 0) applyRootExploration(ns, nn);
                             break;
                         }
@@ -491,6 +466,17 @@ namespace Core
             if (!reused) startSearch(newState, m_realHashHistory);
         }
 
+        // ----------------------------------------------------------------
+        // selectMove
+        //
+        // temperature = 1.0  → proportional to visit counts  (self-play)
+        // temperature = 0.0  → greedy / best child           (inference)
+        //
+        // NOTE: temperatureDrop is removed. In self-play, SelfPlayHandler
+        // always passes 1.0 (exploration is handled by Gumbel-Top-K at the
+        // root, not by temperature). In inference, InferenceHandler passes
+        // the temperature from its session config.
+        // ----------------------------------------------------------------
         [[nodiscard]] Action selectMove(float temperature)
         {
             if (m_rootIdx == UINT32_MAX) return Action{};
@@ -502,7 +488,8 @@ namespace Core
             double sum = 0.0;
 
             for (uint32_t i = 0; i < num; ++i) {
-                double count = static_cast<double>(Strategy::getPolicyMetric(m_nodeEdges[start + i]));
+                double count = static_cast<double>(
+                    Strategy::getPolicyMetric(m_nodeEdges[start + i]));
                 double w = (temperature < 1e-3f) ? count : std::pow(count, 1.0 / temperature);
                 weights[i] = w;
                 sum += w;
@@ -527,7 +514,6 @@ namespace Core
 
         // ----------------------------------------------------------------
         // getRootValue — weighted mean Q (W-L) over root children.
-        // Used by SelfPlayHandler::checkResign().
         // ----------------------------------------------------------------
         [[nodiscard]] float getRootValue() const
         {
@@ -551,11 +537,8 @@ namespace Core
         // ----------------------------------------------------------------
         // getRootPolicy
         //
-        // If gumbelSigma > 0: returns the IMPROVED policy target computed
-        // from completed Q-values (Gumbel MuZero policy improvement step).
-        // This produces a significantly better training signal per simulation.
-        //
-        // If gumbelSigma == 0: falls back to raw visit counts (classic AlphaZero).
+        // gumbelSigma > 0 → improved policy from completed Q-values
+        // gumbelSigma = 0 → raw visit counts (classic AlphaZero)
         // ----------------------------------------------------------------
         [[nodiscard]] std::array<float, Defs::kActionSpace> getRootPolicy() const
         {
@@ -565,11 +548,9 @@ namespace Core
             if (m_rootIdx == UINT32_MAX) return pol;
             uint32_t num = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
             if (num == 0) return pol;
-
             uint32_t start = m_nodeFirstChild[m_rootIdx];
 
             if (m_config.gumbelSigma > 0.0f) {
-                // ---- Gumbel improved policy target ----
                 Strategy::computeImprovedPolicy(
                     start, num,
                     m_nodePrior.data(),
@@ -579,18 +560,15 @@ namespace Core
                         return m_engine->actionToIdx(m_nodeAction[start + offset]);
                     },
                     Defs::kActionSpace,
-                    pol.data()
-                );
+                    pol.data());
             }
             else {
-                // ---- Classic visit-count policy target ----
                 for (uint32_t i = 0; i < num; ++i) {
                     float    v = static_cast<float>(Strategy::getPolicyMetric(m_nodeEdges[start + i]));
                     uint32_t id = m_engine->actionToIdx(m_nodeAction[start + i]);
                     if (id < Defs::kActionSpace) pol[id] += v;
                 }
             }
-
             return pol;
         }
 

@@ -48,8 +48,8 @@ namespace Core
         BackendConfig  m_backendCfg;
         TrainingConfig m_trainingCfg;
         std::string    m_datasetPath = "";
+        float          m_drawSampleRate = 1.0f;
 
-        // ----------------------------------------------------------------
         void specificSetup(const YAML::Node& config) override
         {
             m_backendCfg.load(config, "train");
@@ -66,9 +66,11 @@ namespace Core
             oss << dataFolder << "/iteration_"
                 << std::setw(4) << std::setfill('0') << m_trainingCfg.currentIteration << ".bin";
             m_datasetPath = oss.str();
+
+            if (config["training"] && config["training"]["drawSampleRate"])
+                m_drawSampleRate = config["training"]["drawSampleRate"].as<float>();
         }
 
-        // ----------------------------------------------------------------
         void resetGame(GameContext& g)
         {
             g.replayBuffer.clear();
@@ -84,12 +86,6 @@ namespace Core
                 g.trees[p]->startSearch(g.currentState, g.hashHistory);
         }
 
-        // ----------------------------------------------------------------
-        // Resignation check — 100% game-agnostic.
-        // Threshold and minPly come from EngineConfig (YAML engine section).
-        // The GameResult is built by the engine via buildResignResult() so
-        // SelfPlayHandler never touches a game-specific EndReason.
-        // ----------------------------------------------------------------
         std::optional<GameResult> checkResign(const GameContext& g,
             uint32_t           currentPlayer) const
         {
@@ -106,29 +102,37 @@ namespace Core
         }
 
         // ----------------------------------------------------------------
-        // Progress display (called every 10 official games)
-        // All stats (avgLen, speed) are computed on OFFICIAL games only.
+        // Progress display
+        //
+        // Counters:
+        //   gamesWritten  : games actually stored in the replay buffer
+        //                   → loop stop condition, shown as progress
+        //   gamesPlayed   : all games played including filtered draws
+        //                   → shown for transparency
+        //   writtenMoves  : total plies of written games → AvgLen
+        //   gpuMoves      : all plies while gamesWritten < target → Speed
         // ----------------------------------------------------------------
-        void printProgress(uint32_t gamesFinished,
-            uint32_t target,
-            uint64_t officialMoves,
-            uint64_t officialMovesGPU,
+        void printProgress(uint32_t gamesWritten, uint32_t target,
+            uint32_t gamesPlayed,
+            uint64_t writtenMoves, uint64_t gpuMoves,
             double   elapsedSec) const
         {
-            const double avgLen = (gamesFinished > 0)
-                ? static_cast<double>(officialMoves) / gamesFinished
-                : 0.0;
+            const double avgLen = (gamesWritten > 0)
+                ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
+            const double speed = gpuMoves / std::max(elapsedSec, 1e-6);
 
-            // Speed = official moves / elapsed (only meaningful moves counted)
-            const double speed = officialMovesGPU / std::max(elapsedSec, 1e-6);
+            // Filter rate: how many games were played per written game
+            const double filterRatio = (gamesWritten > 0)
+                ? static_cast<double>(gamesPlayed) / gamesWritten : 1.0;
 
             std::cout
-                << "[SelfPlay] " << std::setw(6) << gamesFinished
+                << "[SelfPlay] " << std::setw(6) << gamesWritten
                 << " / " << target
-                << " games | AvgLen: "
-                << std::fixed << std::setprecision(1) << avgLen << " ply"
-                << " | Speed: "
-                << std::fixed << std::setprecision(1) << speed << " m/s"
+                << " written (" << std::fixed << std::setprecision(0)
+                << gamesPlayed << " played"
+                << ", x" << std::setprecision(1) << filterRatio << " filter)"
+                << " | AvgLen: " << std::fixed << std::setprecision(1) << avgLen << " ply"
+                << " | Speed: " << std::fixed << std::setprecision(1) << speed << " m/s"
                 << "\r" << std::flush;
         }
 
@@ -143,10 +147,17 @@ namespace Core
             const uint32_t target = m_trainingCfg.gamesPerIteration;
 
             std::cout
-                << "[SelfPlay] Starting     : " << target << " games\n"
+                << "[SelfPlay] Starting     : " << target << " games to write\n"
                 << "[SelfPlay] File          : " << m_datasetPath << "\n"
                 << "[SelfPlay] Parallelism   : " << m_backendCfg.numParallelGames
-                << " games | Batch: " << m_backendCfg.inferenceBatchSize << "\n";
+                << " games | Batch: " << m_backendCfg.inferenceBatchSize << "\n"
+                << "[SelfPlay] Exploration   : Gumbel-Top-K (k="
+                << this->m_engineCfg.gumbelK << ")\n"
+                << "[SelfPlay] Policy target : "
+                << (this->m_engineCfg.gumbelSigma > 0.0f
+                    ? "Improved Q (sigma=" + std::to_string(this->m_engineCfg.gumbelSigma) + ")"
+                    : "Visit counts (classic)")
+                << "\n";
 
             const float thr = this->m_engineCfg.resignThreshold;
             if (thr > -1.0f && thr < 0.0f)
@@ -155,14 +166,15 @@ namespace Core
             else
                 std::cout << "[SelfPlay] Resign        : disabled\n";
 
-            if (m_trainingCfg.drawSampleRate < 1.0f)
-                std::cout << "[SelfPlay] Draw filter   : " << m_trainingCfg.drawSampleRate * 100.f << "% kept\n";
+            if (m_drawSampleRate < 1.0f)
+                std::cout << "[SelfPlay] Draw filter   : " << m_drawSampleRate * 100.f
+                << "% kept (iteration will be ~"
+                << std::fixed << std::setprecision(1) << (1.0f / m_drawSampleRate)
+                << "x longer)\n";
             else
                 std::cout << "[SelfPlay] Draw filter   : disabled\n";
 
-            // ----------------------------------------------------------------
-            // Allocate game contexts
-            // ----------------------------------------------------------------
+            // ---- Allocate game contexts ----
             std::vector<GameContext> games(m_backendCfg.numParallelGames);
             size_t treeAllocIdx = 0;
             for (auto& g : games) {
@@ -172,8 +184,8 @@ namespace Core
                 resetGame(g);
             }
 
-            // Mark the first batch of games as official
-            for (size_t i = 0; i < games.size() && i < target; ++i)
+            // Mark initial batch as official
+            for (size_t i = 0; i < games.size() && i < static_cast<size_t>(target); ++i)
                 games[i].isOfficial = true;
 
             std::ofstream outFile(m_datasetPath, std::ios::binary | std::ios::app);
@@ -183,24 +195,28 @@ namespace Core
             // ----------------------------------------------------------------
             // Counters
             //
-            // gamesFinished   : official games written to disk (≤ target)
-            // officialMoves   : plies of official games → used for AvgLen
-            // officialMovesGPU: all plies while we still had official games
-            //                   (including GPU-filling non-official games)
-            //                   → used for Speed display
-            // totalMoves      : every ply (official + fill) → not displayed
+            // gamesWritten  : games actually stored on disk
+            //                 → LOOP STOP CONDITION (gamesWritten >= target)
+            //                 → shown as progress numerator
+            //
+            // gamesPlayed   : all completed games (written + filtered draws)
+            //                 → shown for transparency
+            //
+            // writtenMoves  : plies of written games only → correct AvgLen
+            //
+            // gpuMoves      : all plies played while gamesWritten < target
+            //                 → denominator for Speed (true GPU throughput)
             // ----------------------------------------------------------------
-            uint32_t gamesFinished = 0;
-            uint64_t officialMoves = 0;  // plies of written official games
-            uint64_t officialMovesGPU = 0;  // all plies while target not yet reached
-            uint64_t totalMoves = 0;
+            uint32_t gamesWritten = 0;
+            uint32_t gamesPlayed = 0;
+            uint64_t writtenMoves = 0;
+            uint64_t gpuMoves = 0;
 
             auto startTime = std::chrono::high_resolution_clock::now();
 
-            while (gamesFinished < target &&
+            while (gamesWritten < target &&
                 g_keepRunning.load(std::memory_order_acquire))
             {
-                // ---- MCTS for all parallel games ----
                 std::vector<TreeSearch<GT>*> activeTrees;
                 activeTrees.reserve(m_backendCfg.numParallelGames);
                 for (auto& g : games) {
@@ -210,13 +226,11 @@ namespace Core
                 this->m_threadPool->executeMultipleTrees(
                     activeTrees, this->m_engineCfg.numSimulations);
 
-                // ---- Process each game ----
                 for (auto& g : games)
                 {
-                    const uint32_t cp = this->m_engine->getCurrentPlayer(g.currentState);
+                    const uint32_t  cp = this->m_engine->getCurrentPlayer(g.currentState);
                     TreeSearch<GT>* activeTree = g.trees[cp];
 
-                    // Record sample for official games only
                     if (g.isOfficial)
                     {
                         State povState = g.currentState;
@@ -224,7 +238,6 @@ namespace Core
 
                         const size_t histSize = std::min<size_t>(
                             g.actionHistory.size(), Defs::kMaxHistory);
-
                         AlignedVec<Action> povHistory(reserve_only, histSize);
                         for (size_t i = g.actionHistory.size() - histSize;
                             i < g.actionHistory.size(); ++i)
@@ -241,12 +254,9 @@ namespace Core
                         );
                     }
 
-                    // Play the move
-                    g.turnCount++;
-                    const float  temp = (g.turnCount < this->m_engineCfg.temperatureDrop)
-                        ? 1.0f : 0.1f;
-                    const Action action = activeTree->selectMove(temp);
+                    const Action action = activeTree->selectMove(1.0f);
 
+                    g.turnCount++;
                     this->m_engine->applyAction(action, g.currentState);
                     g.hashHistory.push_back(g.currentState.hash());
                     g.actionHistory.push_back(action);
@@ -254,12 +264,8 @@ namespace Core
                     for (size_t p = 0; p < Defs::kNumPlayers; ++p)
                         g.trees[p]->advanceRoot(action, g.currentState);
 
-                    totalMoves++;
-                    // Count all moves while we still need to produce games
-                    // (includes GPU-filling non-official slots)
-                    officialMovesGPU++;
+                    gpuMoves++;
 
-                    // Check terminal
                     std::optional<GameResult> outcome =
                         this->m_engine->getGameResult(g.currentState, g.hashHistory);
 
@@ -268,71 +274,58 @@ namespace Core
 
                     if (outcome.has_value())
                     {
-                        // ------------------------------------------------
-                        // FIX: only flush if this slot is official AND we
-                        // have not yet reached the target.
-                        // Without the second condition, games that were
-                        // already marked isOfficial=true but started before
-                        // gamesFinished reached target would be flushed,
-                        // producing more games than requested.
-                        // ------------------------------------------------
-                        if (g.isOfficial && gamesFinished < target)
+                        if (g.isOfficial && gamesWritten < target)
                         {
-                            // flushToFile applies draw filtering internally
+                            gamesPlayed++;
+
                             const bool written = g.replayBuffer.flushToFile(
-                                outcome.value(), outFile, m_trainingCfg.drawSampleRate);
+                                outcome.value(), outFile, m_drawSampleRate);
 
                             if (written) {
-                                // Only count plies of games that were actually written
-                                officialMoves += g.turnCount;
+                                writtenMoves += g.turnCount;
+                                gamesWritten++;
                             }
 
-                            // Always count the game toward the quota, whether
-                            // written or filtered (we still "played" it)
-                            gamesFinished++;
-
-                            if (gamesFinished % 10 == 0 || gamesFinished == target)
+                            if (gamesWritten % 10 == 0 || gamesWritten == target)
                             {
                                 auto   now = std::chrono::high_resolution_clock::now();
                                 double elapsed = std::chrono::duration<double>(
                                     now - startTime).count();
-                                printProgress(gamesFinished, target,
-                                    officialMoves, officialMovesGPU, elapsed);
+                                printProgress(gamesWritten, target, gamesPlayed,
+                                    writtenMoves, gpuMoves, elapsed);
                             }
                         }
 
                         resetGame(g);
-
-                        // The new game in this slot is official only if we
-                        // still need more games.  Checked HERE, after the
-                        // potential increment of gamesFinished above.
-                        g.isOfficial = (gamesFinished < target);
+                        // Official if we still need more written games
+                        g.isOfficial = (gamesWritten < target);
                     }
                 }
             }
 
             outFile.close();
 
-            // ----------------------------------------------------------------
-            // Final summary
-            // ----------------------------------------------------------------
-            auto   endTime = std::chrono::high_resolution_clock::now();
-            double totalSec = std::chrono::duration<double>(endTime - startTime).count();
-            int    hh = static_cast<int>(totalSec) / 3600;
-            int    mm = (static_cast<int>(totalSec) % 3600) / 60;
-            int    ss = static_cast<int>(totalSec) % 60;
+            auto   end = std::chrono::high_resolution_clock::now();
+            double sec = std::chrono::duration<double>(end - startTime).count();
+            int    hh = static_cast<int>(sec) / 3600;
+            int    mm = (static_cast<int>(sec) % 3600) / 60;
+            int    ss = static_cast<int>(sec) % 60;
 
-            const double avgLen = (gamesFinished > 0)
-                ? static_cast<double>(officialMoves) / gamesFinished : 0.0;
-            const double speed = officialMovesGPU / std::max(totalSec, 1e-6);
+            const double avgLen = (gamesWritten > 0)
+                ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
+            const double filterRate = (gamesWritten > 0)
+                ? static_cast<double>(gamesPlayed) / gamesWritten : 1.0;
 
             std::cout << "\n\n[SelfPlay] Finished!"
-                << "\n  Games written     : " << gamesFinished
+                << "\n  Games written     : " << gamesWritten
+                << "\n  Games played      : " << gamesPlayed
+                << "\n  Filter ratio      : x" << std::fixed << std::setprecision(2) << filterRate
+                << " (" << std::setprecision(1) << (100.0 / filterRate) << "% kept)"
                 << "\n  Avg Game Length   : " << std::fixed << std::setprecision(1)
                 << avgLen << " ply"
-                << "\n  GPU Moves (total) : " << officialMovesGPU
+                << "\n  GPU Moves (total) : " << gpuMoves
                 << "\n  Avg Speed         : " << std::fixed << std::setprecision(1)
-                << speed << " moves/s"
+                << (gpuMoves / std::max(sec, 1e-6)) << " moves/s"
                 << "\n  Total Time        : "
                 << std::setfill('0') << std::setw(2) << hh << "h "
                 << std::setw(2) << mm << "m "

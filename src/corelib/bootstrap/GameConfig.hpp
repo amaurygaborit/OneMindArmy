@@ -79,9 +79,6 @@ namespace Core
         uint32_t maxDepth;
         float    cPUCT;
         float    virtualLoss;
-        float    dirichletAlpha;
-        float    dirichletEpsilon;
-        uint32_t temperatureDrop;
         uint32_t gumbelK;
         float    gumbelSigma;
 
@@ -101,9 +98,6 @@ namespace Core
             maxDepth = loadVal<uint32_t>(node, "maxDepth", 1u, UINT16_MAX);
             cPUCT = loadVal<float>(node, "cPUCT", 0.0f, 100.0f);
             virtualLoss = loadVal<float>(node, "virtualLoss", 0.0f, 100.0f);
-            dirichletAlpha = loadVal<float>(node, "dirichletAlpha", 0.0f, 100.0f); // Peut �tre 0.0 en match
-            dirichletEpsilon = loadVal<float>(node, "dirichletEpsilon", 0.0f, 1.0f);
-            temperatureDrop = loadVal<uint32_t>(node, "temperatureDrop", 0u, 1000u);
             gumbelK = loadVal<uint32_t>(node, "gumbelK", 0u, 1000u);
             gumbelSigma = loadVal<float>(node, "gumbelSigma", 0.0f, 10.0f);
 
