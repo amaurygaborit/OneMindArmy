@@ -82,6 +82,9 @@ namespace Core
         float    dirichletAlpha;
         float    dirichletEpsilon;
         uint32_t temperatureDrop;
+        uint32_t gumbelK;
+        float    gumbelSigma;
+
 		float    fpuValue;
         uint32_t maxNodes;
         float    memoryThreshold;
@@ -101,6 +104,9 @@ namespace Core
             dirichletAlpha = loadVal<float>(node, "dirichletAlpha", 0.0f, 100.0f); // Peut �tre 0.0 en match
             dirichletEpsilon = loadVal<float>(node, "dirichletEpsilon", 0.0f, 1.0f);
             temperatureDrop = loadVal<uint32_t>(node, "temperatureDrop", 0u, 1000u);
+            gumbelK = loadVal<uint32_t>(node, "gumbelK", 0u, 1000u);
+            gumbelSigma = loadVal<float>(node, "gumbelSigma", 0.0f, 10.0f);
+
 			fpuValue = loadVal<float>(node, "fpuValue", -100.0f, 100.0f);
             maxNodes = loadVal<uint32_t>(node, "maxNodes", 1000u, UINT32_MAX);
             memoryThreshold = loadVal<float>(node, "memoryThreshold", 0.1f, 1.0f);
@@ -122,6 +128,7 @@ namespace Core
         float weightDecay = 0.0f;
         float valueLossWeight = 0.0f;
 		uint32_t currentIteration = 0;
+		float drawSampleRate = 0.0f;
 
         void load(const YAML::Node& root, const std::string& runMode)
         {
@@ -140,6 +147,7 @@ namespace Core
             weightDecay = loadVal<float>(node, "weightDecay", 0.0f, 1.0f);
             valueLossWeight = loadVal<float>(node, "valueLossWeight", 0.0f, 10.0f);
 			currentIteration = loadVal<uint32_t>(node, "currentIteration", 0u, UINT32_MAX);
+            drawSampleRate = loadVal<float>(node, "drawSampleRate", 0.0f, 1.0f);
         }
     };
 

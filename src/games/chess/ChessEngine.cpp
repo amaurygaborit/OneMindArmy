@@ -333,7 +333,7 @@ namespace Chess
 		// ==================================================================
 		// 1. HARD CAP — Plafond absolu de longueur de partie
 		// ==================================================================
-		if (static_cast<int>(hashHistory.size()) >= 300)
+		if (static_cast<int>(hashHistory.size()) >= 100)
 		{
 			return GameResult{ WDL_DRAW, static_cast<uint32_t>(ChessEndReason::MaxPlyReached) };
 		}

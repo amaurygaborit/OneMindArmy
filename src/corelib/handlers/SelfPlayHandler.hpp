@@ -21,8 +21,8 @@
 
 inline std::atomic<bool> g_keepRunning{ true };
 
-inline void sigintHandler(int signal) {
-    std::cout << "\n\n[System] Signal CTRL+C détecté ! Fermeture propre en cours...\n";
+inline void sigintHandler(int /*signal*/) {
+    std::cout << "\n\n[System] CTRL+C detected. Graceful shutdown in progress...\n";
     g_keepRunning.store(false, std::memory_order_release);
 }
 
@@ -37,18 +37,19 @@ namespace Core
     private:
         struct GameContext {
             std::array<TreeSearch<GT>*, Defs::kNumPlayers> trees;
-            State                    currentState;
-            AlignedVec<Action>       actionHistory;
-            std::vector<uint64_t>    hashHistory;
-            ReplayBuffer<GT>         replayBuffer;
-            uint32_t                 turnCount = 0;
-            bool                     isOfficial = false;
+            State                 currentState;
+            AlignedVec<Action>    actionHistory;
+            std::vector<uint64_t> hashHistory;
+            ReplayBuffer<GT>      replayBuffer;
+            uint32_t              turnCount = 0;
+            bool                  isOfficial = false;
         };
 
         BackendConfig  m_backendCfg;
         TrainingConfig m_trainingCfg;
         std::string    m_datasetPath = "";
 
+        // ----------------------------------------------------------------
         void specificSetup(const YAML::Node& config) override
         {
             m_backendCfg.load(config, "train");
@@ -57,8 +58,8 @@ namespace Core
             if (!config["name"])
                 throw std::runtime_error("Config Error: Missing 'name' field in YAML.");
 
-            std::string gameName = config["name"].as<std::string>();
-            std::string dataFolder = "data/" + gameName;
+            const std::string gameName = config["name"].as<std::string>();
+            const std::string dataFolder = "data/" + gameName;
             std::filesystem::create_directories(dataFolder);
 
             std::ostringstream oss;
@@ -67,6 +68,7 @@ namespace Core
             m_datasetPath = oss.str();
         }
 
+        // ----------------------------------------------------------------
         void resetGame(GameContext& g)
         {
             g.replayBuffer.clear();
@@ -82,33 +84,52 @@ namespace Core
                 g.trees[p]->startSearch(g.currentState, g.hashHistory);
         }
 
-        // ------------------------------------------------------------------
-        // Résignation — game-agnostic.
-        //
-        // FIX : suppression du format WDL (kNumPlayers * 3) — migration
-        // partielle qui causait un buffer overread dans ThreadPool::loopInference
-        // (copy_n de 6 éléments depuis un array de 2) → crash silencieux du
-        // thread d'inférence → executeMultipleTrees bloqué indéfiniment.
-        //
-        // On délègue la construction du GameResult à buildResignResult()
-        // défini dans le moteur — format scalaire simple par joueur [-1, +1].
-        // ------------------------------------------------------------------
+        // ----------------------------------------------------------------
+        // Resignation check — 100% game-agnostic.
+        // Threshold and minPly come from EngineConfig (YAML engine section).
+        // The GameResult is built by the engine via buildResignResult() so
+        // SelfPlayHandler never touches a game-specific EndReason.
+        // ----------------------------------------------------------------
         std::optional<GameResult> checkResign(const GameContext& g,
             uint32_t           currentPlayer) const
         {
             const float    threshold = this->m_engineCfg.resignThreshold;
             const uint32_t minPly = this->m_engineCfg.resignMinPly;
 
-            if (threshold <= -1.0f || threshold >= 0.0f)
-                return std::nullopt;
-
-            if (g.turnCount < minPly)
-                return std::nullopt;
+            if (threshold <= -1.0f || threshold >= 0.0f) return std::nullopt;
+            if (g.turnCount < minPly)                    return std::nullopt;
 
             if (g.trees[currentPlayer]->getRootValue() < threshold)
                 return this->m_engine->buildResignResult(currentPlayer);
 
             return std::nullopt;
+        }
+
+        // ----------------------------------------------------------------
+        // Progress display (called every 10 official games)
+        // All stats (avgLen, speed) are computed on OFFICIAL games only.
+        // ----------------------------------------------------------------
+        void printProgress(uint32_t gamesFinished,
+            uint32_t target,
+            uint64_t officialMoves,
+            uint64_t officialMovesGPU,
+            double   elapsedSec) const
+        {
+            const double avgLen = (gamesFinished > 0)
+                ? static_cast<double>(officialMoves) / gamesFinished
+                : 0.0;
+
+            // Speed = official moves / elapsed (only meaningful moves counted)
+            const double speed = officialMovesGPU / std::max(elapsedSec, 1e-6);
+
+            std::cout
+                << "[SelfPlay] " << std::setw(6) << gamesFinished
+                << " / " << target
+                << " games | AvgLen: "
+                << std::fixed << std::setprecision(1) << avgLen << " ply"
+                << " | Speed: "
+                << std::fixed << std::setprecision(1) << speed << " m/s"
+                << "\r" << std::flush;
         }
 
     public:
@@ -121,18 +142,27 @@ namespace Core
 
             const uint32_t target = m_trainingCfg.gamesPerIteration;
 
-            std::cout << "[SelfPlay] Starting  : " << target << " games\n"
-                << "[SelfPlay] File       : " << m_datasetPath << "\n"
-                << "[SelfPlay] Parallelism: " << m_backendCfg.numParallelGames
+            std::cout
+                << "[SelfPlay] Starting     : " << target << " games\n"
+                << "[SelfPlay] File          : " << m_datasetPath << "\n"
+                << "[SelfPlay] Parallelism   : " << m_backendCfg.numParallelGames
                 << " games | Batch: " << m_backendCfg.inferenceBatchSize << "\n";
 
             const float thr = this->m_engineCfg.resignThreshold;
             if (thr > -1.0f && thr < 0.0f)
-                std::cout << "[SelfPlay] Resign     : threshold=" << thr
+                std::cout << "[SelfPlay] Resign        : threshold=" << thr
                 << "  minPly=" << this->m_engineCfg.resignMinPly << "\n";
             else
-                std::cout << "[SelfPlay] Resign     : disabled\n";
+                std::cout << "[SelfPlay] Resign        : disabled\n";
 
+            if (m_trainingCfg.drawSampleRate < 1.0f)
+                std::cout << "[SelfPlay] Draw filter   : " << m_trainingCfg.drawSampleRate * 100.f << "% kept\n";
+            else
+                std::cout << "[SelfPlay] Draw filter   : disabled\n";
+
+            // ----------------------------------------------------------------
+            // Allocate game contexts
+            // ----------------------------------------------------------------
             std::vector<GameContext> games(m_backendCfg.numParallelGames);
             size_t treeAllocIdx = 0;
             for (auto& g : games) {
@@ -142,18 +172,35 @@ namespace Core
                 resetGame(g);
             }
 
+            // Mark the first batch of games as official
+            for (size_t i = 0; i < games.size() && i < target; ++i)
+                games[i].isOfficial = true;
+
             std::ofstream outFile(m_datasetPath, std::ios::binary | std::ios::app);
             if (!outFile.is_open())
                 throw std::runtime_error("Fatal: Cannot open dataset file: " + m_datasetPath);
 
+            // ----------------------------------------------------------------
+            // Counters
+            //
+            // gamesFinished   : official games written to disk (≤ target)
+            // officialMoves   : plies of official games → used for AvgLen
+            // officialMovesGPU: all plies while we still had official games
+            //                   (including GPU-filling non-official games)
+            //                   → used for Speed display
+            // totalMoves      : every ply (official + fill) → not displayed
+            // ----------------------------------------------------------------
             uint32_t gamesFinished = 0;
-            uint64_t officialMoves = 0;
+            uint64_t officialMoves = 0;  // plies of written official games
+            uint64_t officialMovesGPU = 0;  // all plies while target not yet reached
             uint64_t totalMoves = 0;
-            auto     startTime = std::chrono::high_resolution_clock::now();
+
+            auto startTime = std::chrono::high_resolution_clock::now();
 
             while (gamesFinished < target &&
                 g_keepRunning.load(std::memory_order_acquire))
             {
+                // ---- MCTS for all parallel games ----
                 std::vector<TreeSearch<GT>*> activeTrees;
                 activeTrees.reserve(m_backendCfg.numParallelGames);
                 for (auto& g : games) {
@@ -163,18 +210,21 @@ namespace Core
                 this->m_threadPool->executeMultipleTrees(
                     activeTrees, this->m_engineCfg.numSimulations);
 
+                // ---- Process each game ----
                 for (auto& g : games)
                 {
-                    uint32_t        cp = this->m_engine->getCurrentPlayer(g.currentState);
+                    const uint32_t cp = this->m_engine->getCurrentPlayer(g.currentState);
                     TreeSearch<GT>* activeTree = g.trees[cp];
 
+                    // Record sample for official games only
                     if (g.isOfficial)
                     {
                         State povState = g.currentState;
                         this->m_engine->changeStatePov(cp, povState);
 
-                        size_t histSize = std::min<size_t>(
+                        const size_t histSize = std::min<size_t>(
                             g.actionHistory.size(), Defs::kMaxHistory);
+
                         AlignedVec<Action> povHistory(reserve_only, histSize);
                         for (size_t i = g.actionHistory.size() - histSize;
                             i < g.actionHistory.size(); ++i)
@@ -191,9 +241,11 @@ namespace Core
                         );
                     }
 
+                    // Play the move
                     g.turnCount++;
-                    float  temp = (g.turnCount < this->m_engineCfg.temperatureDrop) ? 1.0f : 0.1f;
-                    Action action = activeTree->selectMove(temp);
+                    const float  temp = (g.turnCount < this->m_engineCfg.temperatureDrop)
+                        ? 1.0f : 0.1f;
+                    const Action action = activeTree->selectMove(temp);
 
                     this->m_engine->applyAction(action, g.currentState);
                     g.hashHistory.push_back(g.currentState.hash());
@@ -203,8 +255,11 @@ namespace Core
                         g.trees[p]->advanceRoot(action, g.currentState);
 
                     totalMoves++;
-                    if (g.isOfficial) officialMoves++;
+                    // Count all moves while we still need to produce games
+                    // (includes GPU-filling non-official slots)
+                    officialMovesGPU++;
 
+                    // Check terminal
                     std::optional<GameResult> outcome =
                         this->m_engine->getGameResult(g.currentState, g.hashHistory);
 
@@ -213,27 +268,44 @@ namespace Core
 
                     if (outcome.has_value())
                     {
-                        if (g.isOfficial)
+                        // ------------------------------------------------
+                        // FIX: only flush if this slot is official AND we
+                        // have not yet reached the target.
+                        // Without the second condition, games that were
+                        // already marked isOfficial=true but started before
+                        // gamesFinished reached target would be flushed,
+                        // producing more games than requested.
+                        // ------------------------------------------------
+                        if (g.isOfficial && gamesFinished < target)
                         {
-                            g.replayBuffer.flushToFile(outcome.value(), outFile);
+                            // flushToFile applies draw filtering internally
+                            const bool written = g.replayBuffer.flushToFile(
+                                outcome.value(), outFile, m_trainingCfg.drawSampleRate);
+
+                            if (written) {
+                                // Only count plies of games that were actually written
+                                officialMoves += g.turnCount;
+                            }
+
+                            // Always count the game toward the quota, whether
+                            // written or filtered (we still "played" it)
                             gamesFinished++;
 
                             if (gamesFinished % 10 == 0 || gamesFinished == target)
                             {
                                 auto   now = std::chrono::high_resolution_clock::now();
-                                double elapsed = std::chrono::duration<double>(now - startTime).count();
-                                double avgLen = gamesFinished > 0
-                                    ? static_cast<double>(officialMoves) / gamesFinished : 0.0;
-
-                                std::cout << "[SelfPlay] " << std::setw(6) << gamesFinished
-                                    << " / " << target << " games | AvgLen: "
-                                    << std::fixed << std::setprecision(1) << avgLen
-                                    << " ply | Speed: "
-                                    << (totalMoves / std::max(elapsed, 1e-6))
-                                    << " m/s\r" << std::flush;
+                                double elapsed = std::chrono::duration<double>(
+                                    now - startTime).count();
+                                printProgress(gamesFinished, target,
+                                    officialMoves, officialMovesGPU, elapsed);
                             }
                         }
+
                         resetGame(g);
+
+                        // The new game in this slot is official only if we
+                        // still need more games.  Checked HERE, after the
+                        // potential increment of gamesFinished above.
                         g.isOfficial = (gamesFinished < target);
                     }
                 }
@@ -241,24 +313,30 @@ namespace Core
 
             outFile.close();
 
-            auto   end = std::chrono::high_resolution_clock::now();
-            double sec = std::chrono::duration<double>(end - startTime).count();
-            int    hh = static_cast<int>(sec) / 3600;
-            int    mm = (static_cast<int>(sec) % 3600) / 60;
-            int    ss = static_cast<int>(sec) % 60;
-            double avg = gamesFinished > 0
+            // ----------------------------------------------------------------
+            // Final summary
+            // ----------------------------------------------------------------
+            auto   endTime = std::chrono::high_resolution_clock::now();
+            double totalSec = std::chrono::duration<double>(endTime - startTime).count();
+            int    hh = static_cast<int>(totalSec) / 3600;
+            int    mm = (static_cast<int>(totalSec) % 3600) / 60;
+            int    ss = static_cast<int>(totalSec) % 60;
+
+            const double avgLen = (gamesFinished > 0)
                 ? static_cast<double>(officialMoves) / gamesFinished : 0.0;
+            const double speed = officialMovesGPU / std::max(totalSec, 1e-6);
 
             std::cout << "\n\n[SelfPlay] Finished!"
-                << "\n  Games (official)  : " << gamesFinished
-                << "\n  Avg Game Length   : " << std::fixed << std::setprecision(1) << avg << " ply"
-                << "\n  Total Moves (GPU) : " << totalMoves
+                << "\n  Games written     : " << gamesFinished
+                << "\n  Avg Game Length   : " << std::fixed << std::setprecision(1)
+                << avgLen << " ply"
+                << "\n  GPU Moves (total) : " << officialMovesGPU
+                << "\n  Avg Speed         : " << std::fixed << std::setprecision(1)
+                << speed << " moves/s"
                 << "\n  Total Time        : "
                 << std::setfill('0') << std::setw(2) << hh << "h "
                 << std::setw(2) << mm << "m "
-                << std::setw(2) << ss << "s"
-                << "\n  Avg Speed (GPU)   : "
-                << (totalMoves / std::max(sec, 1e-6)) << " moves/s\n";
+                << std::setw(2) << ss << "s\n";
         }
     };
 }

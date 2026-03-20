@@ -17,17 +17,20 @@ engine:
 
   cPUCT: 1.5
   virtualLoss: 0.0
-  dirichletAlpha: 0.3
-  dirichletEpsilon: 0.25
-  temperatureDrop: 80
+  dirichletAlpha: 0.0
+  dirichletEpsilon: 0.0
+  temperatureDrop: 0
+  gumbelK: 8          # top-k actions gardées à la racine (0 = Dirichlet classique)
+  gumbelSigma: 1.0    # température pour la policy améliorée (0 = visit counts classiques)
+
   fpuValue: 1.5
 
   maxNodes: 1000
   memoryThreshold: 0.90
   reuseTree: false
 
-  resignThreshold: -0.95
-  resignMinPly: 40
+  resignThreshold: -0.90
+  resignMinPly: 30
 
 training:
   gamesPerIteration: 5000
@@ -41,6 +44,7 @@ training:
   lrMinFactor: 0.1
   weightDecay: 0.0001
   valueLossWeight: 0.25
+  drawSampleRate: 0.2
 
   currentIteration: 0
   logEveryNBatches: 100

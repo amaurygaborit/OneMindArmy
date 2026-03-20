@@ -36,16 +36,13 @@ namespace Core
     // ========================================================================
     // NODE EVENT
     //
-    // Context object shuttled between Gather → Inference → Backprop.
+    // WDL LAYOUT: for each player p, 3 consecutive floats:
+    //   [p*3+0] = P(Win), [p*3+1] = P(Draw), [p*3+2] = P(Loss)
     //
-    // WDL LAYOUT (Win / Draw / Loss per player):
-    //   For each player p, 3 consecutive floats at indices [p*3+0, p*3+1, p*3+2].
-    //   This matches GameResult::wdl and ModelResultsT::values exactly.
+    //   nnWDL   : filled by GPU inference
+    //   trueWDL : filled from GameResult::wdl for terminal nodes
     //
-    //   nnWDL   — filled by GPU inference (network estimate)
-    //   trueWDL — filled from GameResult::wdl for terminal nodes
-    //
-    //   Scalar used by PUCT = W - L = [p*3+0] - [p*3+2]  ∈ [-1, +1]
+    // Scalar for PUCT/backprop: W - L = [p*3+0] - [p*3+2]  ∈ [-1, +1]
     // ========================================================================
     template<ValidGameTraits GT>
     struct NodeEvent
@@ -57,11 +54,10 @@ namespace Core
         AlignedVec<Action>   pathActions;
         AlignedVec<uint64_t> pathHashes;
 
-        std::array<float, Defs::kNNInputSize>       nnInput{};
-        std::array<float, Defs::kNumPlayers * 3>    nnWDL{};    // NN value output
-        std::array<float, Defs::kNumPlayers * 3>    trueWDL{};  // terminal outcome
-
-        std::array<float, Defs::kActionSpace>       policy{};
+        std::array<float, Defs::kNNInputSize>    nnInput{};
+        std::array<float, Defs::kNumPlayers * 3> nnWDL{};
+        std::array<float, Defs::kNumPlayers * 3> trueWDL{};
+        std::array<float, Defs::kActionSpace>    policy{};
 
         ActionList validActions;
 
@@ -93,8 +89,6 @@ namespace Core
         }
 
         // W - L ∈ [-1, +1] for player p.
-        // fromNN=true  → use nnWDL   (non-terminal leaf)
-        // fromNN=false → use trueWDL (terminal node)
         [[nodiscard]] float scalarValue(size_t p, bool fromNN) const noexcept
         {
             const auto& wdl = fromNN ? nnWDL : trueWDL;
@@ -104,6 +98,15 @@ namespace Core
 
     // ========================================================================
     // MONTE CARLO TREE SEARCH (Lock-Free Asynchronous)
+    //
+    // Gumbel extensions (compatible with the async parallel pipeline):
+    //
+    //  1. applyGumbelTopK() is called instead of applyDirichletNoise()
+    //     at the root. Controlled by gumbelK in EngineConfig (0 = disabled).
+    //
+    //  2. getRootPolicy() uses computeImprovedPolicy() to produce a better
+    //     training target via completed Q-values. Controlled by gumbelSigma
+    //     in EngineConfig (0 = raw visit counts, classic AlphaZero).
     // ========================================================================
     template<ValidGameTraits GT>
     class TreeSearch
@@ -189,34 +192,48 @@ namespace Core
         }
 
         // ----------------------------------------------------------------
-        void applyDirichletNoise(uint32_t startIdx, uint32_t nChildren)
+        // Root exploration — Gumbel-Top-K if gumbelK > 0, Dirichlet otherwise.
+        // Only called on the root node (leaf == m_rootIdx in backprop).
+        // ----------------------------------------------------------------
+        void applyRootExploration(uint32_t startIdx, uint32_t nChildren)
         {
-            thread_local std::mt19937 rng{ std::random_device{}() };
-            std::gamma_distribution<float> gamma(m_config.dirichletAlpha, 1.0f);
+            if (nChildren == 0) return;
 
-            float sum = 0.0f;
-            std::vector<float> noise(nChildren);
-            for (uint32_t i = 0; i < nChildren; ++i) { noise[i] = gamma(rng); sum += noise[i]; }
+            const uint32_t k = m_config.gumbelK;
 
-            if (sum > 1e-9f) {
-                const float invSum = 1.0f / sum;
-                const float epsilon = m_config.dirichletEpsilon;
+            if (k > 0) {
+                // ---- Gumbel-Top-K ----
+                // More principled than Dirichlet: exploration is proportional
+                // to the policy prior rather than uniform noise.
+                Strategy::applyGumbelTopK(
+                    startIdx, nChildren,
+                    m_nodePrior.data(),   // priors modified in-place
+                    k);
+            }
+            else if (m_config.dirichletEpsilon > 0.0f) {
+                // ---- Classic Dirichlet (fallback when gumbelK = 0) ----
+                thread_local std::mt19937 rng{ std::random_device{}() };
+                std::gamma_distribution<float> gamma(m_config.dirichletAlpha, 1.0f);
+
+                float sum = 0.0f;
+                std::vector<float> noise(nChildren);
                 for (uint32_t i = 0; i < nChildren; ++i) {
-                    float n = noise[i] * invSum;
-                    float p = m_nodePrior[startIdx + i];
-                    m_nodePrior[startIdx + i] = (1.0f - epsilon) * p + epsilon * n;
+                    noise[i] = gamma(rng);
+                    sum += noise[i];
+                }
+
+                if (sum > 1e-9f) {
+                    const float invSum = 1.0f / sum;
+                    const float eps = m_config.dirichletEpsilon;
+                    for (uint32_t i = 0; i < nChildren; ++i) {
+                        float n = noise[i] * invSum;
+                        float p = m_nodePrior[startIdx + i];
+                        m_nodePrior[startIdx + i] = (1.0f - eps) * p + eps * n;
+                    }
                 }
             }
         }
 
-        // ----------------------------------------------------------------
-        // Copy GameResult::wdl (the float array inside the struct) into
-        // a raw std::array<float, kNumPlayers*3>.
-        //
-        // GameResult is a STRUCT with two fields:
-        //   .wdl    : std::array<float, kNumPlayers * 3>
-        //   .reason : uint32_t
-        // We only copy .wdl — reason is not used by the search.
         // ----------------------------------------------------------------
         static void copyWDLFromResult(const GameResult& src,
             std::array<float, Defs::kNumPlayers * 3>& dst) noexcept
@@ -257,8 +274,8 @@ namespace Core
             return m_simulationsLaunched.fetch_add(1, std::memory_order_relaxed) + 1;
         }
 
-        [[nodiscard]] uint32_t getLaunchedCount()    const { return m_simulationsLaunched.load(std::memory_order_relaxed); }
-        [[nodiscard]] uint32_t getSimulationCount()  const { return m_simulationsFinished.load(std::memory_order_relaxed); }
+        [[nodiscard]] uint32_t getLaunchedCount()   const { return m_simulationsLaunched.load(std::memory_order_relaxed); }
+        [[nodiscard]] uint32_t getSimulationCount() const { return m_simulationsFinished.load(std::memory_order_relaxed); }
 
         void startSearch(const State& rootState, std::span<const uint64_t> currentHistory)
         {
@@ -295,7 +312,6 @@ namespace Core
             {
                 uint8_t flags = m_nodeFlags[currIdx].val.load(std::memory_order_acquire);
 
-                // ---- Known terminal ----
                 if (flags & FLAG_TERMINAL) {
                     ctx.isTerminal = true;
                     ctx.leafNodeIdx = currIdx;
@@ -307,7 +323,6 @@ namespace Core
                     return false;
                 }
 
-                // ---- Unexpanded: claim for expansion ----
                 if (!(flags & FLAG_EXPANDED)) {
                     uint8_t expected = FLAG_NONE;
                     if (m_nodeFlags[currIdx].val.compare_exchange_strong(
@@ -327,10 +342,10 @@ namespace Core
                         ctx.isTerminal = false;
                         prepareNodeInput(ctx, currState);
                         ctx.validActions = m_engine->getValidActions(currState, fullHash);
-                        return true; // → GPU evaluation needed
+                        return true;
                     }
                     else {
-                        if (expected & FLAG_EXPANDED) continue; // retry
+                        if (expected & FLAG_EXPANDED) continue;
                         ctx.collision = true;
                         ctx.isTerminal = true;
                         ctx.leafNodeIdx = currIdx;
@@ -339,7 +354,6 @@ namespace Core
                     }
                 }
 
-                // ---- Expanded: descend via PUCT ----
                 uint32_t nChildren = m_nodeNumChildren[currIdx].val.load(std::memory_order_relaxed);
                 if (nChildren == 0) {
                     ctx.isTerminal = true;
@@ -407,8 +421,9 @@ namespace Core
                                 m_nodeFlags[startIdx + i].val.store(FLAG_NONE, std::memory_order_relaxed);
                             }
 
-                            if (leaf == m_rootIdx && m_config.dirichletEpsilon > 0.0f)
-                                applyDirichletNoise(startIdx, nChildren);
+                            // Root exploration: Gumbel-Top-K or Dirichlet
+                            if (leaf == m_rootIdx)
+                                applyRootExploration(startIdx, nChildren);
 
                             m_nodeFirstChild[leaf] = startIdx;
                             m_nodeNumChildren[leaf].val.store(
@@ -423,9 +438,7 @@ namespace Core
                 }
             }
 
-            // Scalar per player: W - L
-            // Terminal → exact outcome from trueWDL
-            // Non-terminal → network estimate from nnWDL
+            // W - L scalar per player
             std::array<float, Defs::kNumPlayers> scalars{};
             for (size_t p = 0; p < Defs::kNumPlayers; ++p)
                 scalars[p] = ctx.scalarValue(p, /*fromNN=*/!ctx.isTerminal);
@@ -466,11 +479,10 @@ namespace Core
                             m_rootState = newState;
                             resetCounters();
                             reused = true;
-                            if (m_config.dirichletEpsilon > 0.0f) {
-                                uint32_t ns = m_nodeFirstChild[m_rootIdx];
-                                uint32_t nn = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
-                                if (nn > 0) applyDirichletNoise(ns, nn);
-                            }
+                            // Re-apply root exploration on the new root
+                            uint32_t ns = m_nodeFirstChild[m_rootIdx];
+                            uint32_t nn = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
+                            if (nn > 0) applyRootExploration(ns, nn);
                             break;
                         }
                     }
@@ -513,6 +525,10 @@ namespace Core
             return m_nodeAction[start + num - 1];
         }
 
+        // ----------------------------------------------------------------
+        // getRootValue — weighted mean Q (W-L) over root children.
+        // Used by SelfPlayHandler::checkResign().
+        // ----------------------------------------------------------------
         [[nodiscard]] float getRootValue() const
         {
             if (m_rootIdx == UINT32_MAX) return 0.0f;
@@ -532,17 +548,49 @@ namespace Core
             return (totalVisits < 1.0f) ? 0.0f : (weightedSum / totalVisits);
         }
 
+        // ----------------------------------------------------------------
+        // getRootPolicy
+        //
+        // If gumbelSigma > 0: returns the IMPROVED policy target computed
+        // from completed Q-values (Gumbel MuZero policy improvement step).
+        // This produces a significantly better training signal per simulation.
+        //
+        // If gumbelSigma == 0: falls back to raw visit counts (classic AlphaZero).
+        // ----------------------------------------------------------------
         [[nodiscard]] std::array<float, Defs::kActionSpace> getRootPolicy() const
         {
             std::array<float, Defs::kActionSpace> pol{};
+            pol.fill(0.0f);
+
             if (m_rootIdx == UINT32_MAX) return pol;
             uint32_t num = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
+            if (num == 0) return pol;
+
             uint32_t start = m_nodeFirstChild[m_rootIdx];
-            for (uint32_t i = 0; i < num; ++i) {
-                float    v = static_cast<float>(Strategy::getPolicyMetric(m_nodeEdges[start + i]));
-                uint32_t id = m_engine->actionToIdx(m_nodeAction[start + i]);
-                if (id < Defs::kActionSpace) pol[id] += v;
+
+            if (m_config.gumbelSigma > 0.0f) {
+                // ---- Gumbel improved policy target ----
+                Strategy::computeImprovedPolicy(
+                    start, num,
+                    m_nodePrior.data(),
+                    m_nodeEdges.data(),
+                    m_config.gumbelSigma,
+                    [this, start](uint32_t offset) -> uint32_t {
+                        return m_engine->actionToIdx(m_nodeAction[start + offset]);
+                    },
+                    Defs::kActionSpace,
+                    pol.data()
+                );
             }
+            else {
+                // ---- Classic visit-count policy target ----
+                for (uint32_t i = 0; i < num; ++i) {
+                    float    v = static_cast<float>(Strategy::getPolicyMetric(m_nodeEdges[start + i]));
+                    uint32_t id = m_engine->actionToIdx(m_nodeAction[start + i]);
+                    if (id < Defs::kActionSpace) pol[id] += v;
+                }
+            }
+
             return pol;
         }
 
