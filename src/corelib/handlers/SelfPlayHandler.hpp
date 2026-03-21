@@ -37,12 +37,12 @@ namespace Core
     private:
         struct GameContext {
             std::array<TreeSearch<GT>*, Defs::kNumPlayers> trees;
-            State                 currentState;
-            AlignedVec<Action>    actionHistory;
-            std::vector<uint64_t> hashHistory;
-            ReplayBuffer<GT>      replayBuffer;
-            uint32_t              turnCount = 0;
-            bool                  isOfficial = false;
+            State                  currentState;
+            AlignedVec<Action>     actionHistory;
+            std::vector<uint64_t>  hashHistory;
+            ReplayBuffer<GT>       replayBuffer;
+            uint32_t               turnCount = 0;
+            bool                   isOfficial = false;
         };
 
         BackendConfig  m_backendCfg;
@@ -83,7 +83,7 @@ namespace Core
         }
 
         std::optional<GameResult> checkResign(const GameContext& g,
-            uint32_t           currentPlayer) const
+            uint32_t currentPlayer) const
         {
             const float    threshold = this->m_engineCfg.resignThreshold;
             const uint32_t minPly = this->m_engineCfg.resignMinPly;
@@ -97,17 +97,6 @@ namespace Core
             return std::nullopt;
         }
 
-        // ----------------------------------------------------------------
-        // Progress display
-        //
-        // Counters:
-        //   gamesWritten  : games actually stored in the replay buffer
-        //                   → loop stop condition, shown as progress
-        //   gamesPlayed   : all games played including filtered draws
-        //                   → shown for transparency
-        //   writtenMoves  : total plies of written games → AvgLen
-        //   gpuMoves      : all plies while gamesWritten < target → Speed
-        // ----------------------------------------------------------------
         void printProgress(uint32_t gamesWritten, uint32_t target,
             uint32_t gamesPlayed,
             uint64_t writtenMoves, uint64_t gpuMoves,
@@ -116,8 +105,6 @@ namespace Core
             const double avgLen = (gamesWritten > 0)
                 ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
             const double speed = gpuMoves / std::max(elapsedSec, 1e-6);
-
-            // Filter rate: how many games were played per written game
             const double filterRatio = (gamesWritten > 0)
                 ? static_cast<double>(gamesPlayed) / gamesWritten : 1.0;
 
@@ -143,15 +130,16 @@ namespace Core
             const uint32_t target = m_trainingCfg.gamesPerIteration;
 
             std::cout
-                << "[SelfPlay] Starting      : " << target << " games to write\n"
-                << "[SelfPlay] File          : " << m_datasetPath << "\n"
+                << "[SelfPlay] Starting     : " << target << " games to write\n"
+                << "[SelfPlay] File         : " << m_datasetPath << "\n"
                 << "[SelfPlay] Parallelism   : " << m_backendCfg.numParallelGames
                 << " games | Batch: " << m_backendCfg.inferenceBatchSize << "\n"
                 << "[SelfPlay] Exploration   : Gumbel-Top-K (k="
                 << this->m_engineCfg.gumbelK << ")\n"
                 << "[SelfPlay] Policy target : "
-                << (this->m_engineCfg.gumbelSigma > 0.0f
-                    ? "Improved Q (sigma=" + std::to_string(this->m_engineCfg.gumbelSigma) + ")"
+                << (this->m_engineCfg.gumbelCScale > 0.0f
+                    ? "Improved Q (cVisit=" + std::to_string(this->m_engineCfg.gumbelCVisit) +
+                    ", cScale=" + std::to_string(this->m_engineCfg.gumbelCScale) + ")"
                     : "Visit counts (classic)")
                 << "\n";
 
@@ -180,7 +168,6 @@ namespace Core
                 resetGame(g);
             }
 
-            // Mark initial batch as official
             for (size_t i = 0; i < games.size() && i < static_cast<size_t>(target); ++i)
                 games[i].isOfficial = true;
 
@@ -188,21 +175,6 @@ namespace Core
             if (!outFile.is_open())
                 throw std::runtime_error("Fatal: Cannot open dataset file: " + m_datasetPath);
 
-            // ----------------------------------------------------------------
-            // Counters
-            //
-            // gamesWritten  : games actually stored on disk
-            //                 → LOOP STOP CONDITION (gamesWritten >= target)
-            //                 → shown as progress numerator
-            //
-            // gamesPlayed   : all completed games (written + filtered draws)
-            //                 → shown for transparency
-            //
-            // writtenMoves  : plies of written games only → correct AvgLen
-            //
-            // gpuMoves      : all plies played while gamesWritten < target
-            //                 → denominator for Speed (true GPU throughput)
-            // ----------------------------------------------------------------
             uint32_t gamesWritten = 0;
             uint32_t gamesPlayed = 0;
             uint64_t writtenMoves = 0;
@@ -219,6 +191,7 @@ namespace Core
                     uint32_t cp = this->m_engine->getCurrentPlayer(g.currentState);
                     activeTrees.push_back(g.trees[cp]);
                 }
+
                 this->m_threadPool->executeMultipleTrees(
                     activeTrees, this->m_engineCfg.numSimulations);
 
@@ -243,10 +216,12 @@ namespace Core
                             povHistory.push_back(a);
                         }
 
+                        // CORRECTION CRITIQUE ICI : Ajout du paramètre `cp`
                         g.replayBuffer.recordTurn(
                             StateEncoder<GT>::encode(povState, povHistory),
                             activeTree->getRootPolicy(),
-                            activeTree->getRootLegalMovesMask()
+                            activeTree->getRootLegalMovesMask(),
+                            cp
                         );
                     }
 
@@ -293,7 +268,6 @@ namespace Core
                         }
 
                         resetGame(g);
-                        // Official if we still need more written games
                         g.isOfficial = (gamesWritten < target);
                     }
                 }

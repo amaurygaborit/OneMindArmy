@@ -50,6 +50,7 @@ namespace Core
         USING_GAME_TYPES(GT);
 
         uint32_t             leafNodeIdx = 0;
+        uint32_t             leafViewer = UINT32_MAX;
         AlignedVec<uint32_t> path;
         AlignedVec<Action>   pathActions;
         AlignedVec<uint64_t> pathHashes;
@@ -98,16 +99,6 @@ namespace Core
 
     // ========================================================================
     // MONTE CARLO TREE SEARCH (Lock-Free Asynchronous)
-    //
-    // Root exploration uses Gumbel-Top-K exclusively.
-    // dirichletAlpha / dirichletEpsilon are no longer used.
-    //
-    // Policy target uses computeImprovedPolicy (completed Q-values) when
-    // gumbelSigma > 0, raw visit counts otherwise.
-    //
-    // Temperature for move selection is always 1.0 during self-play
-    // (exploration is handled by Gumbel at the root, not by temperature).
-    // During inference, temperature is passed explicitly by InferenceHandler.
     // ========================================================================
     template<ValidGameTraits GT>
     class TreeSearch
@@ -122,6 +113,7 @@ namespace Core
         static constexpr uint8_t FLAG_EXPANDING = 0x01;
         static constexpr uint8_t FLAG_EXPANDED = 0x02;
         static constexpr uint8_t FLAG_TERMINAL = 0x04;
+        static constexpr uint8_t FLAG_GUMBEL_APPLIED = 0x08; // NOUVEAU: Verrou anti-double-bruit
 
         const EngineConfig           m_config;
         std::shared_ptr<IEngine<GT>> m_engine;
@@ -153,6 +145,7 @@ namespace Core
         void prepareNodeInput(Event& ctx, const State& leafState)
         {
             uint32_t viewer = m_engine->getCurrentPlayer(leafState);
+            ctx.leafViewer = viewer;
             State    povState = leafState;
             m_engine->changeStatePov(viewer, povState);
 
@@ -190,24 +183,29 @@ namespace Core
         }
 
         // ----------------------------------------------------------------
-        // Root exploration — Gumbel-Top-K only.
-        //
-        // Dirichlet noise is removed: it was a uniform perturbation that
-        // added noise independently of the policy quality. Gumbel-Top-K
-        // is strictly superior: it selects candidates proportionally to
-        // the prior, so strong moves are more likely to be explored.
-        //
-        // If gumbelK == 0 (disabled in config), no exploration is applied
-        // at the root (pure exploitation — useful for evaluation games).
+        // SÉCURITÉ GUMBEL: Applique l'exploration de racine de manière idempotente.
+        // Si la fonction a déjà été appelée sur ce nœud, elle retourne immédiatement.
         // ----------------------------------------------------------------
-        void applyRootExploration(uint32_t startIdx, uint32_t nChildren)
+        void applyRootExploration(uint32_t nodeIdx)
         {
-            if (nChildren == 0 || m_config.gumbelK == 0) return;
+            if (m_config.gumbelK == 0) return;
+
+            // Vérifier si Gumbel a déjà été appliqué sur ce nœud
+            uint8_t flags = m_nodeFlags[nodeIdx].val.load(std::memory_order_acquire);
+            if (flags & FLAG_GUMBEL_APPLIED) return;
+
+            uint32_t nChildren = m_nodeNumChildren[nodeIdx].val.load(std::memory_order_relaxed);
+            if (nChildren == 0) return;
+
+            uint32_t startIdx = m_nodeFirstChild[nodeIdx];
 
             Strategy::applyGumbelTopK(
                 startIdx, nChildren,
                 m_nodePrior.data(),
                 m_config.gumbelK);
+
+            // Verrouiller ce nœud pour ne plus jamais lui appliquer de bruit
+            m_nodeFlags[nodeIdx].val.fetch_or(FLAG_GUMBEL_APPLIED, std::memory_order_release);
         }
 
         // ----------------------------------------------------------------
@@ -397,13 +395,15 @@ namespace Core
                                 m_nodeFlags[startIdx + i].val.store(FLAG_NONE, std::memory_order_relaxed);
                             }
 
-                            if (leaf == m_rootIdx)
-                                applyRootExploration(startIdx, nChildren);
-
                             m_nodeFirstChild[leaf] = startIdx;
                             m_nodeNumChildren[leaf].val.store(
                                 static_cast<uint16_t>(nChildren), std::memory_order_relaxed);
                             m_nodeFlags[leaf].val.store(FLAG_EXPANDED, std::memory_order_release);
+
+                            // Appliquer l'exploration à la racine si c'est la toute première fois
+                            if (leaf == m_rootIdx) {
+                                applyRootExploration(leaf);
+                            }
                         }
                         else {
                             m_nodeFlags[leaf].val.store(
@@ -414,8 +414,17 @@ namespace Core
             }
 
             std::array<float, Defs::kNumPlayers> scalars{};
-            for (size_t p = 0; p < Defs::kNumPlayers; ++p)
-                scalars[p] = ctx.scalarValue(p, /*fromNN=*/!ctx.isTerminal);
+            if (ctx.isTerminal) {
+                for (size_t p = 0; p < Defs::kNumPlayers; ++p)
+                    scalars[p] = ctx.scalarValue(p, false);
+            }
+            else {
+                for (size_t p = 0; p < Defs::kNumPlayers; ++p) {
+                    // p est l'index relatif dans nnWDL. On calcule à quel joueur absolu cela correspond.
+                    uint32_t absPlayer = (ctx.leafViewer + p) % Defs::kNumPlayers;
+                    scalars[absPlayer] = ctx.scalarValue(p, true);
+                }
+            }
 
             for (int i = static_cast<int>(ctx.path.size()) - 1; i >= 1; --i) {
                 const uint32_t nodeIdx = ctx.path[i];
@@ -453,11 +462,9 @@ namespace Core
                             m_rootState = newState;
                             resetCounters();
                             reused = true;
-                            // Re-apply Gumbel on the new root
-                            const uint32_t ns = m_nodeFirstChild[m_rootIdx];
-                            const uint32_t nn = m_nodeNumChildren[m_rootIdx].val.load(
-                                std::memory_order_relaxed);
-                            if (nn > 0) applyRootExploration(ns, nn);
+                            // Application sécurisée du bruit de Gumbel
+                            // (sera ignoré si FLAG_GUMBEL_APPLIED est déjà défini)
+                            applyRootExploration(m_rootIdx);
                             break;
                         }
                     }
@@ -466,16 +473,6 @@ namespace Core
             if (!reused) startSearch(newState, m_realHashHistory);
         }
 
-        // ----------------------------------------------------------------
-        // selectMove
-        //
-        // temperature = 1.0  → proportional to visit counts  (self-play)
-        // temperature = 0.0  → greedy / best child           (inference)
-        //
-        // NOTE: temperatureDrop is removed. In self-play, SelfPlayHandler
-        // always passes 1.0 (exploration is handled by Gumbel-Top-K at the
-        // root, not by temperature). In inference, InferenceHandler passes
-        // the temperature from its session config.
         // ----------------------------------------------------------------
         [[nodiscard]] Action selectMove(float temperature)
         {
@@ -513,8 +510,6 @@ namespace Core
         }
 
         // ----------------------------------------------------------------
-        // getRootValue — weighted mean Q (W-L) over root children.
-        // ----------------------------------------------------------------
         [[nodiscard]] float getRootValue() const
         {
             if (m_rootIdx == UINT32_MAX) return 0.0f;
@@ -535,11 +530,6 @@ namespace Core
         }
 
         // ----------------------------------------------------------------
-        // getRootPolicy
-        //
-        // gumbelSigma > 0 → improved policy from completed Q-values
-        // gumbelSigma = 0 → raw visit counts (classic AlphaZero)
-        // ----------------------------------------------------------------
         [[nodiscard]] std::array<float, Defs::kActionSpace> getRootPolicy() const
         {
             std::array<float, Defs::kActionSpace> pol{};
@@ -550,12 +540,13 @@ namespace Core
             if (num == 0) return pol;
             uint32_t start = m_nodeFirstChild[m_rootIdx];
 
-            if (m_config.gumbelSigma > 0.0f) {
+            if (m_config.gumbelCScale > 0.0f) {
                 Strategy::computeImprovedPolicy(
                     start, num,
                     m_nodePrior.data(),
                     m_nodeEdges.data(),
-                    m_config.gumbelSigma,
+                    m_config.gumbelCVisit,
+                    m_config.gumbelCScale,
                     [this, start](uint32_t offset) -> uint32_t {
                         return m_engine->actionToIdx(m_nodeAction[start + offset]);
                     },

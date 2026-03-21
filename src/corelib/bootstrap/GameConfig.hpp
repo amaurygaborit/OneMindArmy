@@ -80,7 +80,8 @@ namespace Core
         float    cPUCT;
         float    virtualLoss;
         uint32_t gumbelK;
-        float    gumbelSigma;
+        float    gumbelCVisit;
+        float    gumbelCScale;
 
 		float    fpuValue;
         uint32_t maxNodes;
@@ -95,14 +96,15 @@ namespace Core
             if (!node) throw std::runtime_error("Config Error: Missing 'engine' block (Always mandatory).");
 
             numSimulations = loadVal<uint32_t>(node, "numSimulations", 1u, UINT32_MAX);
-            maxDepth = loadVal<uint32_t>(node, "maxDepth", 1u, UINT16_MAX);
+            maxDepth = loadVal<uint32_t>(node, "maxDepth", 1u, UINT32_MAX);
             cPUCT = loadVal<float>(node, "cPUCT", 0.0f, 100.0f);
             virtualLoss = loadVal<float>(node, "virtualLoss", 0.0f, 100.0f);
-            gumbelK = loadVal<uint32_t>(node, "gumbelK", 0u, 1000u);
-            gumbelSigma = loadVal<float>(node, "gumbelSigma", 0.0f, 10.0f);
+            gumbelK = loadVal<uint32_t>(node, "gumbelK", 0u, UINT32_MAX);
+            gumbelCVisit = loadVal<float>(node, "gumbelCVisit", 0.0f, INFINITY);
+            gumbelCScale = loadVal<float>(node, "gumbelCScale", 0.0f, INFINITY);
 
 			fpuValue = loadVal<float>(node, "fpuValue", -100.0f, 100.0f);
-            maxNodes = loadVal<uint32_t>(node, "maxNodes", 1000u, UINT32_MAX);
+            maxNodes = loadVal<uint32_t>(node, "maxNodes", 1u, UINT32_MAX);
             memoryThreshold = loadVal<float>(node, "memoryThreshold", 0.1f, 1.0f);
             reuseTree = loadVal<bool>(node, "reuseTree", false, true);
             resignThreshold = loadVal<float>(node, "resignThreshold", -2.0f, 0.0f);

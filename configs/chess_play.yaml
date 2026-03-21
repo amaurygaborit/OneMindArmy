@@ -6,21 +6,23 @@
 name: chess
 
 engine:
-  numSimulations: 800
+  numSimulations: 5000
   maxDepth: 128
 
   cPUCT: 1.5
-  virtualLoss: 2.0         # Lower penalty needed for single game
-  gumbelK: 0              # top-k actions gardées à la racine (0 = Dirichlet classique)
-  gumbelSigma: 0.0        # température pour la policy améliorée (0 = visit counts classiques)
   fpuValue: 0.0            # Assume unknown moves are neutral instead of bad
+  virtualLoss: 2.0         # Lower penalty needed for single game
 
-  maxNodes: 2000           # Allow the tree to grow huge for one game
+  gumbelK: 0
+  gumbelCVisit: 0.0
+  gumbelCScale: 0.0
+
+  maxNodes: 1000000           # Allow the tree to grow huge for one game
   memoryThreshold: 0.90
-  reuseTree: false         # Reuse tree between turns to think on opponent's time
+  reuseTree: true         # Reuse tree between turns to think on opponent's time
 
   resignThreshold: -0.95
-  resignMinPly: 40
+  resignMinPly: 200
 
 backend:
   numGPUs: auto
@@ -54,5 +56,5 @@ specific:
   render:
     whiteAtBottom: true
     showCoordinates: true
-    replaceRendering: true
+    replaceRendering: false
     renderRawState: false

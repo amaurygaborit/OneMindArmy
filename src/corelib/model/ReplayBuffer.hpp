@@ -11,15 +11,6 @@
 
 namespace Core
 {
-    // ============================================================================
-    // TRAINING SAMPLE (Discrete Timestep Memory)
-    //
-    // Memory layout is strictly mapped to PyTorch's Dataset requirements to
-    // enable blazingly fast Zero-Copy memory mapping (mmap) during training.
-    //
-    // #pragma pack(1) ensures zero padding between fields — the Python dataset
-    // reads this binary layout directly via numpy memmap.
-    // ============================================================================
 #pragma pack(push, 1)
 
     template<ValidGameTraits GT>
@@ -31,30 +22,12 @@ namespace Core
 
         std::array<float, Defs::kNNInputSize>    nnInput;
         std::array<float, Defs::kActionSpace>    policy;
-        std::array<float, Defs::kNumPlayers * 3> wdlTarget;      // WDL per player
-        std::array<uint8_t, kMaskBytes>          legalMovesMask; // bit-packed
+        std::array<float, Defs::kNumPlayers * 3> wdlTarget;
+        std::array<uint8_t, kMaskBytes>          legalMovesMask;
     };
 
 #pragma pack(pop)
 
-    // ============================================================================
-    // REPLAY BUFFER (Local Game Memory Streamer)
-    //
-    // Collects training samples during a single Self-Play game, then flushes
-    // them to a binary file in a single write.
-    //
-    // Draw filtering (drawSampleRate):
-    //   A game is considered a draw if wdl[0*3+1] > 0.5 (Draw is the dominant
-    //   outcome for player 0). When a draw is detected, flushToFile keeps it
-    //   with probability `drawSampleRate` and discards it otherwise.
-    //
-    //   This reduces the draw bias in the replay buffer during early training
-    //   when most games end in a draw by adjudication. It should be relaxed
-    //   progressively as the network matures (iter ~50+).
-    //
-    //   drawSampleRate = 1.0 → keep all draws (no filtering)
-    //   drawSampleRate = 0.2 → keep only 20% of draws
-    // ============================================================================
     template<ValidGameTraits GT>
     class ReplayBuffer
     {
@@ -63,8 +36,8 @@ namespace Core
 
     private:
         AlignedVec<TrainingSample<GT>> m_samples;
+        AlignedVec<uint32_t>           m_viewers; // Utilisation de AlignedVec pour correspondre à m_samples
 
-        // Thread-local RNG — one per worker thread, no contention
         static std::mt19937& getRng()
         {
             thread_local std::mt19937 rng{ std::random_device{}() };
@@ -73,57 +46,39 @@ namespace Core
 
     public:
         ReplayBuffer()
-            : m_samples(reserve_only, 512)  // pre-allocate for ~512 plies (safe for chess/go)
+            : m_samples(reserve_only, 512)
+            , m_viewers(reserve_only, 512)
         {
         }
 
-        void clear() noexcept { m_samples.clear(); }
+        void clear() noexcept
+        {
+            m_samples.clear();
+            m_viewers.clear();
+        }
 
         [[nodiscard]] size_t size() const noexcept { return m_samples.size(); }
 
-        // ------------------------------------------------------------------------
-        // RECORD TURN
-        // Stores a single MCTS decision step (state + policy + legal mask).
-        // The WDL target is filled retroactively in flushToFile().
-        // ------------------------------------------------------------------------
         void recordTurn(
             const std::array<float, Defs::kNNInputSize>& encodedInput,
             const std::array<float, Defs::kActionSpace>& policy,
-            const std::array<bool, Defs::kActionSpace>& legalMaskBool)
+            const std::array<bool, Defs::kActionSpace>& legalMaskBool,
+            uint32_t currentPlayer) // NOUVEAU : On trace qui devait jouer
         {
             m_samples.emplace_back();
+            m_viewers.push_back(currentPlayer);
             auto& sample = m_samples.back();
 
-            std::memcpy(sample.nnInput.data(),
-                encodedInput.data(),
-                Defs::kNNInputSize * sizeof(float));
+            std::memcpy(sample.nnInput.data(), encodedInput.data(), Defs::kNNInputSize * sizeof(float));
+            std::memcpy(sample.policy.data(), policy.data(), Defs::kActionSpace * sizeof(float));
 
-            std::memcpy(sample.policy.data(),
-                policy.data(),
-                Defs::kActionSpace * sizeof(float));
-
-            // Bit-pack the legal mask: bit i set ↔ legalMaskBool[i] == true
-            // Uses little-endian convention: bit i → byte[i/8], bit (i%8)
-            // This matches np.unpackbits(..., bitorder='little') in dataset.py
             std::memset(sample.legalMovesMask.data(), 0, sample.legalMovesMask.size());
             for (size_t i = 0; i < Defs::kActionSpace; ++i) {
                 if (legalMaskBool[i])
                     sample.legalMovesMask[i / 8] |= static_cast<uint8_t>(1u << (i % 8));
             }
-
-            // wdlTarget is intentionally left zeroed here — filled in flushToFile()
         }
 
-        // ------------------------------------------------------------------------
-        // FLUSH TO FILE (Binary Stream Dump)
-        //
-        // 1. Applies draw filtering: if the game is a draw and a random draw
-        //    exceeds drawSampleRate, the whole game is silently discarded.
-        // 2. Retroactively stamps the WDL target on every recorded sample.
-        // 3. Writes all samples in a single contiguous binary write.
-        //
-        // Returns true if the game was written, false if it was filtered out.
-        // ------------------------------------------------------------------------
         bool flushToFile(
             const GameResult& finalOutcome,
             std::ofstream& outFile,
@@ -134,12 +89,7 @@ namespace Core
             if (!outFile.good())
                 throw std::runtime_error("ReplayBuffer: output stream is not writable.");
 
-            // ----------------------------------------------------------------
-            // Draw filtering
-            // A game is a draw when the Draw probability of player 0 dominates.
-            // We use wdl[0*3 + 1] (= P(Draw) for player 0) as the indicator.
-            // drawSampleRate = 1.0 disables filtering entirely.
-            // ----------------------------------------------------------------
+            // 1. Filtrage des parties nulles
             if (drawSampleRate < 1.0f)
             {
                 const bool isDraw = (finalOutcome.wdl[0 * 3 + 1] > 0.5f);
@@ -149,20 +99,32 @@ namespace Core
                     if (dist(getRng()) > drawSampleRate)
                     {
                         clear();
-                        return false;   // game discarded
+                        return false;
                     }
                 }
             }
 
-            // ----------------------------------------------------------------
-            // Retroactively stamp the true WDL target on every sample
-            // ----------------------------------------------------------------
-            for (auto& sample : m_samples)
-                sample.wdlTarget = finalOutcome.wdl;
+            // 2. OPTIMISATION WDL : Précalcul des cibles pour chaque POV possible
+            // precomputedWDL[viewer_id] contiendra l'array WDL exactement tourné pour ce joueur.
+            std::array<std::array<float, Defs::kNumPlayers * 3>, Defs::kNumPlayers> precomputedWDL{};
 
-            // ----------------------------------------------------------------
-            // Single contiguous binary write
-            // ----------------------------------------------------------------
+            for (uint32_t viewer = 0; viewer < Defs::kNumPlayers; ++viewer)
+            {
+                for (uint32_t p = 0; p < Defs::kNumPlayers; ++p)
+                {
+                    uint32_t absPlayer = (viewer + p) % Defs::kNumPlayers;
+                    precomputedWDL[viewer][p * 3 + 0] = finalOutcome.wdl[absPlayer * 3 + 0];
+                    precomputedWDL[viewer][p * 3 + 1] = finalOutcome.wdl[absPlayer * 3 + 1];
+                    precomputedWDL[viewer][p * 3 + 2] = finalOutcome.wdl[absPlayer * 3 + 2];
+                }
+            }
+
+            // 3. Application vectorisée (plus besoin de modulos, juste une copie mémoire)
+            for (size_t i = 0; i < m_samples.size(); ++i) {
+                m_samples[i].wdlTarget = precomputedWDL[m_viewers[i]];
+            }
+
+            // 4. Dump binaire brut
             outFile.write(
                 reinterpret_cast<const char*>(m_samples.data()),
                 static_cast<std::streamsize>(m_samples.size() * sizeof(TrainingSample<GT>)));

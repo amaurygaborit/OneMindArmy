@@ -19,10 +19,6 @@ namespace Core
     //   - No Gumbel noise: gumbelK should be 0 in the inference YAML config.
     //     Exploration noise during MCTS is only useful in self-play to
     //     diversify training data. In inference it hurts playing strength.
-    //
-    // The only source of variety in inference is the stochasticity inherent
-    // to the MCTS simulation order (thread scheduling, virtual loss).
-    // That is sufficient for human-vs-AI games and tournaments.
     // ============================================================================
     template<ValidGameTraits GT>
     class InferenceHandler : public IHandler<GT>
@@ -93,10 +89,7 @@ namespace Core
                         this->m_treeSearch[currentPlayer].get(),
                         this->m_engineCfg.numSimulations);
 
-                    // Le Gumbel-Top-K et le sigma sont appliqués automatiquement par TreeSearch
-                    // via m_engineCfg (gumbelK, gumbelSigma). Aucune action requise ici.
-                    // gumbelK = 0 → arbre déterministe (tournoi)
-                    // gumbelK > 0 → exploration à la racine (parties variées)
+                    // Temperature = 0.0f force le coup le plus exploré/robuste
                     selectedAction = this->m_treeSearch[currentPlayer]->selectMove(0.0f);
 
                     auto t1 = std::chrono::high_resolution_clock::now();
@@ -111,8 +104,10 @@ namespace Core
                         selectedAction = this->m_requester->requestAction(currentState);
                         valid = this->m_engine->isValidAction(
                             currentState, realHashHistory, selectedAction);
+
                         if (!valid && this->m_sessionCfg.verbose)
                             std::cout << "[Warning] Invalid action. Please try again.\n";
+
                     } while (!valid);
                 }
 
@@ -120,6 +115,7 @@ namespace Core
                 this->m_engine->applyAction(selectedAction, currentState);
                 realHashHistory.push_back(currentState.hash());
 
+                // Mettre à jour l'arbre de *toutes* les IAs de la partie (pour garder leur cache MCTS en phase)
                 for (uint32_t p = 0; p < this->m_sessionCfg.numAIs; ++p)
                     this->m_treeSearch[p]->advanceRoot(selectedAction, currentState);
 

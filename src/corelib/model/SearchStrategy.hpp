@@ -20,24 +20,11 @@ namespace Core
     //     Replaces Dirichlet noise for root exploration.
     //     Samples m candidate actions using Gumbel(0,1) noise added to
     //     log(prior), then restricts the root search to those m candidates.
-    //     More principled than Dirichlet: exploration is proportional to the
-    //     policy prior rather than uniform.
     //
     //  2. Completed Q-value policy improvement
     //     After all simulations, the training policy target is computed not
     //     from raw visit counts but from an improved distribution:
-    //
     //       improved_pi(a) ∝ softmax( log(prior(a)) + sigma * Q_completed(a) )
-    //
-    //     where Q_completed(a) = Q(a) for visited actions, and a value
-    //     estimated from the unvisited sibling Q-values for unvisited ones.
-    //     This makes the policy target much more informative per simulation.
-    //
-    // The full sequential halving (SHOT) component of Gumbel MuZero is NOT
-    // implemented here because it is fundamentally incompatible with the
-    // async parallel gather/backprop pipeline (it requires knowing the total
-    // simulation budget upfront and coordinating thread allocation differently).
-    // The two mechanisms above capture ~80% of the Gumbel benefit.
     // ============================================================================
     struct StrategyPUCT
     {
@@ -87,13 +74,9 @@ namespace Core
         }
 
         // ====================================================================
-        // PUCT SCORE
+        // PUCT SCORE (Avec correction de robustesse Gumbel vs FPU)
         //
         // Formula: score(a) = Q(a) + cPUCT * P(a) * sqrt(N_parent) / (1 + N(a))
-        //
-        // FPU (First Play Urgency): unvisited children get fpuValue as their Q
-        // instead of 0. A slightly negative value (e.g. -0.1) prevents over-
-        // exploration of untried moves early in the search.
         // ====================================================================
         static inline float computeScore(const EdgeData& edge,
             uint32_t        parentVisits,
@@ -101,11 +84,24 @@ namespace Core
             float           cPUCT,
             float           fpuValue)
         {
+            // --- FIX CRITIQUE GUMBEL vs FPU ---
+            // Si Gumbel a ramené ce "prior" à 0.0, l'action a été élaguée.
+            // On renvoie un score infiniment bas pour la tuer dans l'œuf,
+            // évitant que la FPU (+0.25 par exemple) ne la relance si 
+            // le Top-K en cours s'avère mauvais.
+            if (prior <= 1e-9f) {
+                return -1e9f;
+            }
+
             const uint32_t childVisits = edge.visitCount.load(std::memory_order_relaxed);
+
+            // FPU: les branches inexplorées reçoivent la valeur FPU plutôt que 0.
             const float    q = (childVisits == 0) ? fpuValue : getQ(edge);
+
             const float    u = cPUCT * prior
                 * (std::sqrt(static_cast<float>(parentVisits))
                     / (1.0f + static_cast<float>(childVisits)));
+
             return q + u;
         }
 
@@ -120,11 +116,7 @@ namespace Core
         }
 
         // ====================================================================
-        // VIRTUAL LOSS (multi-threading collision prevention)
-        //
-        // Applied in Gather: temporarily deflates Q to discourage concurrent
-        // threads from exploring the same path before the GPU result is back.
-        // Removed in Backprop: replaced by the true neural network value.
+        // VIRTUAL LOSS
         // ====================================================================
 
         static inline void applyVirtualLoss(EdgeData& edge, float penalty)
@@ -141,25 +133,6 @@ namespace Core
 
         // ====================================================================
         // GUMBEL-TOP-K ROOT SAMPLING
-        //
-        // Replaces Dirichlet noise for root exploration.
-        //
-        // Algorithm:
-        //   For each child i, draw g_i ~ Gumbel(0,1) and compute:
-        //     score_i = g_i + log(prior_i)
-        //   Select the top-k actions by this score.
-        //   Only those k children participate in the root search.
-        //   All other children get their prior zeroed.
-        //
-        // This is more principled than Dirichlet because exploration is
-        // proportional to the policy prior (high-prior moves are more likely
-        // to be selected) rather than uniform noise.
-        //
-        // Parameters:
-        //   startIdx  : first child index in the node arrays
-        //   nChildren : number of children
-        //   priors    : array of prior probabilities (modified in-place)
-        //   k         : number of candidates to keep (0 = keep all = disabled)
         // ====================================================================
         static void applyGumbelTopK(uint32_t     startIdx,
             uint32_t     nChildren,
@@ -190,7 +163,6 @@ namespace Core
                 });
 
             // Zero-out the priors of non-selected actions
-            // Build a mask of selected indices first
             std::vector<bool> selected(nChildren, false);
             for (uint32_t i = 0; i < k; ++i)
                 selected[scores[i].second] = true;
@@ -214,55 +186,32 @@ namespace Core
 
         // ====================================================================
         // COMPLETED Q-VALUE POLICY IMPROVEMENT
-        //
-        // From Gumbel MuZero (Danihelka et al., 2022), Algorithm 1.
-        //
-        // After all N simulations, compute an improved policy target:
-        //
-        //   improved_pi(a) ∝ softmax( log(prior(a)) + sigma * Q_completed(a) )
-        //
-        // where:
-        //   Q_completed(a) = Q(a)                       if N(a) > 0 (visited)
-        //   Q_completed(a) = mean_visited_Q - penalty    if N(a) == 0 (unvisited)
-        //
-        // The "completed" part fills in unvisited children with a conservative
-        // estimate so that the policy target reflects the full action space.
-        //
-        // sigma controls the sharpness of the improvement (higher = sharper).
-        // A value around 1.0–2.0 works well in practice.
-        //
-        // Parameters:
-        //   startIdx   : first child index in node arrays
-        //   nChildren  : number of children
-        //   priors     : prior probabilities (read-only)
-        //   edges      : edge statistics (read-only)
-        //   actionSpace: size of the policy output array
-        //   actionIds  : actionId of each child (to write into the output array)
-        //   sigma      : temperature for the improvement (config parameter)
-        //   outPolicy  : output array of size actionSpace (zeroed before call)
         // ====================================================================
         template<typename ActionIdFn>
         static void computeImprovedPolicy(
             uint32_t        startIdx,
             uint32_t        nChildren,
-            const float* priors,          // m_nodePrior[startIdx..]
-            const EdgeData* edges,           // m_nodeEdges[startIdx..]
-            float           sigma,
-            ActionIdFn      getActionId,     // lambda: (childOffset) -> uint32_t
+            const float* priors,
+            const EdgeData* edges,
+            float           cVisit,
+            float           cScale,
+            ActionIdFn      getActionId,
             uint32_t        actionSpace,
-            float* outPolicy)       // zeroed array of size actionSpace
+            float* outPolicy)
         {
             if (nChildren == 0) return;
 
             // ----------------------------------------------------------------
-            // Step 1: Compute Q_completed for each child
+            // Step 1: Compute Q_completed for each child & find maxN
             // ----------------------------------------------------------------
-            // Mean Q over visited children (for completing unvisited ones)
             float sumQ = 0.0f;
             int   nVisit = 0;
+            float maxN = 0.0f;
 
             for (uint32_t i = 0; i < nChildren; ++i) {
                 const float n = getPolicyMetric(edges[startIdx + i]);
+                if (n > maxN) maxN = n;
+
                 if (n >= 1.0f) {
                     sumQ += getQ(edges[startIdx + i]);
                     ++nVisit;
@@ -275,6 +224,12 @@ namespace Core
                 : -1.0f;
 
             // ----------------------------------------------------------------
+            // Step 1.5: Compute Dynamic Sigma
+            // ----------------------------------------------------------------
+            const float safeScale = (cScale > 1e-5f) ? cScale : 1.0f;
+            const float sigma = (cVisit + maxN) / safeScale;
+
+            // ----------------------------------------------------------------
             // Step 2: Compute logit = log(prior) + sigma * Q_completed
             // ----------------------------------------------------------------
             std::vector<float> logits(nChildren);
@@ -282,6 +237,7 @@ namespace Core
 
             for (uint32_t i = 0; i < nChildren; ++i) {
                 const float prior = priors[startIdx + i];
+                // Sécurité cohérente avec Gumbel : les priors de 0 donnent -1e9
                 const float logP = (prior > 1e-9f) ? std::log(prior) : -1e9f;
                 const float n = getPolicyMetric(edges[startIdx + i]);
                 const float qComp = (n >= 1.0f) ? getQ(edges[startIdx + i]) : fallbackQ;
