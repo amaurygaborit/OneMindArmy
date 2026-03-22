@@ -17,33 +17,14 @@
 
 namespace Core
 {
-    // ========================================================================
-    // ATOMIC WRAPPER
-    // ========================================================================
     template<typename T>
     struct AtomicVal {
         std::atomic<T> val;
         AtomicVal(T v = 0) : val(v) {}
-        AtomicVal(const AtomicVal& o) {
-            val.store(o.val.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        }
-        AtomicVal& operator=(const AtomicVal& o) {
-            val.store(o.val.load(std::memory_order_relaxed), std::memory_order_relaxed);
-            return *this;
-        }
+        AtomicVal(const AtomicVal& o) { val.store(o.val.load(std::memory_order_relaxed), std::memory_order_relaxed); }
+        AtomicVal& operator=(const AtomicVal& o) { val.store(o.val.load(std::memory_order_relaxed), std::memory_order_relaxed); return *this; }
     };
 
-    // ========================================================================
-    // NODE EVENT
-    //
-    // WDL layout: for each player p, 3 consecutive floats:
-    //   [p*3+0] = P(Win), [p*3+1] = P(Draw), [p*3+2] = P(Loss)
-    //
-    // nnWDL   : GPU inference output
-    // trueWDL : exact outcome for terminal nodes (from GameResult::wdl)
-    //
-    // Scalar for PUCT / backprop: W - L = [p*3+0] - [p*3+2]  ∈ [-1, +1]
-    // ========================================================================
     template<ValidGameTraits GT>
     struct NodeEvent
     {
@@ -54,6 +35,8 @@ namespace Core
         AlignedVec<uint32_t> path;
         AlignedVec<Action>   pathActions;
         AlignedVec<uint64_t> pathHashes;
+
+        std::vector<uint64_t> fullHashBuffer;
 
         std::array<float, Defs::kNNInputSize>    nnInput{};
         std::array<float, Defs::kNumPlayers * 3> nnWDL{};
@@ -70,6 +53,8 @@ namespace Core
             , pathActions(reserve_only, maxDepth)
             , pathHashes(reserve_only, maxDepth)
         {
+            // OPTIMISATION : Pré-allocation massive et définitive pour éviter les re-allocations au runtime.
+            fullHashBuffer.reserve(Defs::kMaxHistory * 2 + maxDepth + 128);
         }
 
         void reset()
@@ -78,6 +63,7 @@ namespace Core
             pathActions.clear();
             pathHashes.clear();
             validActions.clear();
+            fullHashBuffer.clear(); // Clear the content, but capacity remains untouched.
 
             nnInput.fill(0.0f);
             nnWDL.fill(0.0f);
@@ -89,31 +75,26 @@ namespace Core
             collision = false;
         }
 
-        // W - L ∈ [-1, +1] for player p
-        [[nodiscard]] float scalarValue(size_t p, bool fromNN) const noexcept
-        {
+        [[nodiscard]] float scalarValue(size_t p, bool fromNN) const noexcept {
             const auto& wdl = fromNN ? nnWDL : trueWDL;
             return wdl[p * 3 + 0] - wdl[p * 3 + 2];
         }
     };
 
-    // ========================================================================
-    // MONTE CARLO TREE SEARCH (Lock-Free Asynchronous)
-    // ========================================================================
     template<ValidGameTraits GT>
     class TreeSearch
     {
     private:
         USING_GAME_TYPES(GT);
         using Event = NodeEvent<GT>;
-        using Strategy = StrategyPUCT;
+        using Strategy = StrategyPUCT<GT>; // Updated to match templated Strategy
         using EdgeData = typename Strategy::EdgeData;
 
         static constexpr uint8_t FLAG_NONE = 0x00;
         static constexpr uint8_t FLAG_EXPANDING = 0x01;
         static constexpr uint8_t FLAG_EXPANDED = 0x02;
         static constexpr uint8_t FLAG_TERMINAL = 0x04;
-        static constexpr uint8_t FLAG_GUMBEL_APPLIED = 0x08; // NOUVEAU: Verrou anti-double-bruit
+        static constexpr uint8_t FLAG_GUMBEL_APPLIED = 0x08;
 
         const EngineConfig           m_config;
         std::shared_ptr<IEngine<GT>> m_engine;
@@ -134,19 +115,15 @@ namespace Core
         std::atomic<uint32_t>    m_simulationsLaunched{ 0 };
         std::atomic<uint32_t>    m_simulationsFinished{ 0 };
 
-        // ----------------------------------------------------------------
-        uint32_t allocNodes(uint32_t count)
-        {
+        uint32_t allocNodes(uint32_t count) {
             uint32_t idx = m_nodeCount.fetch_add(count, std::memory_order_relaxed);
             return (idx + count > m_config.maxNodes) ? UINT32_MAX : idx;
         }
 
-        // ----------------------------------------------------------------
-        void prepareNodeInput(Event& ctx, const State& leafState)
-        {
+        void prepareNodeInput(Event& ctx, const State& leafState) {
             uint32_t viewer = m_engine->getCurrentPlayer(leafState);
             ctx.leafViewer = viewer;
-            State    povState = leafState;
+            State povState = leafState;
             m_engine->changeStatePov(viewer, povState);
 
             const size_t totalNeeded = Defs::kMaxHistory;
@@ -156,7 +133,7 @@ namespace Core
             size_t startIdx = (totalAvailable > totalNeeded) ? (totalAvailable - totalNeeded) : 0;
             size_t processed = 0;
 
-            AlignedVec<Action> povHistory(reserve_only, totalNeeded);
+            StaticVec<Action, Defs::kMaxHistory> povHistory;
             for (size_t i = 0; i < realCount; ++i) {
                 if (processed >= startIdx || (realCount - i + pathCount) <= totalNeeded) {
                     Action a = m_realHistory[i];
@@ -173,43 +150,25 @@ namespace Core
             ctx.nnInput = StateEncoder<GT>::encode(povState, povHistory);
         }
 
-        // ----------------------------------------------------------------
-        void buildFullHashHistory(const AlignedVec<uint64_t>& pathHashes,
-            std::vector<uint64_t>& out) const
-        {
+        void buildFullHashHistory(const AlignedVec<uint64_t>& pathHashes, std::vector<uint64_t>& out) const {
             out.clear();
             out.insert(out.end(), m_realHashHistory.begin(), m_realHashHistory.end());
             out.insert(out.end(), pathHashes.begin(), pathHashes.end());
         }
 
-        // ----------------------------------------------------------------
-        // SÉCURITÉ GUMBEL: Applique l'exploration de racine de manière idempotente.
-        // Si la fonction a déjà été appelée sur ce nœud, elle retourne immédiatement.
-        // ----------------------------------------------------------------
-        void applyRootExploration(uint32_t nodeIdx)
-        {
+        void applyRootExploration(uint32_t nodeIdx) {
             if (m_config.gumbelK == 0) return;
-
-            // Vérifier si Gumbel a déjà été appliqué sur ce nœud
             uint8_t old_flags = m_nodeFlags[nodeIdx].val.fetch_or(FLAG_GUMBEL_APPLIED, std::memory_order_acq_rel);
-            if (old_flags & FLAG_GUMBEL_APPLIED) return; // Un autre thread l'a déjà fait
+            if (old_flags & FLAG_GUMBEL_APPLIED) return;
 
-            // Seul le thread ayant basculé le bit arrive ici
             uint32_t nChildren = m_nodeNumChildren[nodeIdx].val.load(std::memory_order_relaxed);
             if (nChildren == 0) return;
 
             uint32_t startIdx = m_nodeFirstChild[nodeIdx];
-
-            Strategy::applyGumbelTopK(
-                startIdx, nChildren,
-                m_nodePrior.data(),
-                m_config.gumbelK);
+            Strategy::applyGumbelTopK(startIdx, nChildren, m_nodePrior.data(), m_config.gumbelK);
         }
 
-        // ----------------------------------------------------------------
-        static void copyWDLFromResult(const GameResult& src,
-            std::array<float, Defs::kNumPlayers * 3>& dst) noexcept
-        {
+        static void copyWDLFromResult(const GameResult& src, std::array<float, Defs::kNumPlayers * 3>& dst) noexcept {
             dst = src.wdl;
         }
 
@@ -235,22 +194,16 @@ namespace Core
             }
         }
 
-        void resetCounters()
-        {
+        void resetCounters() {
             m_simulationsLaunched.store(0, std::memory_order_relaxed);
             m_simulationsFinished.store(0, std::memory_order_relaxed);
         }
 
-        uint32_t incrementLaunched()
-        {
-            return m_simulationsLaunched.fetch_add(1, std::memory_order_relaxed) + 1;
-        }
-
+        uint32_t incrementLaunched() { return m_simulationsLaunched.fetch_add(1, std::memory_order_relaxed) + 1; }
         [[nodiscard]] uint32_t getLaunchedCount()   const { return m_simulationsLaunched.load(std::memory_order_relaxed); }
         [[nodiscard]] uint32_t getSimulationCount() const { return m_simulationsFinished.load(std::memory_order_relaxed); }
 
-        void startSearch(const State& rootState, std::span<const uint64_t> currentHistory)
-        {
+        void startSearch(const State& rootState, std::span<const uint64_t> currentHistory) {
             m_nodeCount.store(0, std::memory_order_relaxed);
             resetCounters();
             m_realHashHistory.assign(currentHistory.begin(), currentHistory.end());
@@ -264,11 +217,7 @@ namespace Core
             m_rootState = rootState;
         }
 
-        // ================================================================
-        // PHASE 1: GATHER
-        // ================================================================
-        bool gather(Event& ctx)
-        {
+        bool gather(Event& ctx) {
             ctx.reset();
             if (m_rootIdx == UINT32_MAX) return false;
 
@@ -277,18 +226,14 @@ namespace Core
             ctx.path.push_back(currIdx);
             uint32_t depth = 0;
 
-            std::vector<uint64_t> fullHash;
-            fullHash.reserve(m_realHashHistory.size() + m_config.maxDepth);
-
-            while (true)
-            {
+            while (true) {
                 uint8_t flags = m_nodeFlags[currIdx].val.load(std::memory_order_acquire);
 
                 if (flags & FLAG_TERMINAL) {
                     ctx.isTerminal = true;
                     ctx.leafNodeIdx = currIdx;
-                    buildFullHashHistory(ctx.pathHashes, fullHash);
-                    if (auto outcome = m_engine->getGameResult(currState, fullHash))
+                    buildFullHashHistory(ctx.pathHashes, ctx.fullHashBuffer);
+                    if (auto outcome = m_engine->getGameResult(currState, ctx.fullHashBuffer))
                         copyWDLFromResult(*outcome, ctx.trueWDL);
                     else
                         ctx.trueWDL.fill(0.0f);
@@ -297,23 +242,20 @@ namespace Core
 
                 if (!(flags & FLAG_EXPANDED)) {
                     uint8_t expected = FLAG_NONE;
-                    if (m_nodeFlags[currIdx].val.compare_exchange_strong(
-                        expected, FLAG_EXPANDING, std::memory_order_acquire))
-                    {
+                    if (m_nodeFlags[currIdx].val.compare_exchange_strong(expected, FLAG_EXPANDING, std::memory_order_acquire)) {
                         ctx.leafNodeIdx = currIdx;
-                        buildFullHashHistory(ctx.pathHashes, fullHash);
+                        buildFullHashHistory(ctx.pathHashes, ctx.fullHashBuffer);
 
-                        if (auto outcome = m_engine->getGameResult(currState, fullHash)) {
+                        if (auto outcome = m_engine->getGameResult(currState, ctx.fullHashBuffer)) {
                             ctx.isTerminal = true;
                             copyWDLFromResult(*outcome, ctx.trueWDL);
-                            m_nodeFlags[currIdx].val.store(
-                                FLAG_TERMINAL | FLAG_EXPANDED, std::memory_order_release);
+                            m_nodeFlags[currIdx].val.store(FLAG_TERMINAL | FLAG_EXPANDED, std::memory_order_release);
                             return false;
                         }
 
                         ctx.isTerminal = false;
                         prepareNodeInput(ctx, currState);
-                        ctx.validActions = m_engine->getValidActions(currState, fullHash);
+                        ctx.validActions = m_engine->getValidActions(currState, ctx.fullHashBuffer);
                         return true;
                     }
                     else {
@@ -337,14 +279,11 @@ namespace Core
                 uint32_t firstChild = m_nodeFirstChild[currIdx];
                 uint32_t bestChild = firstChild;
                 float    bestScore = -std::numeric_limits<float>::max();
-                uint32_t parentVisits = std::max(1u, static_cast<uint32_t>(
-                    Strategy::getPolicyMetric(m_nodeEdges[currIdx])));
+                uint32_t parentVisits = std::max(1u, static_cast<uint32_t>(Strategy::getPolicyMetric(m_nodeEdges[currIdx])));
 
                 for (uint32_t i = 0; i < nChildren; ++i) {
                     uint32_t cIdx = firstChild + i;
-                    float    score = Strategy::computeScore(
-                        m_nodeEdges[cIdx], parentVisits,
-                        m_nodePrior[cIdx], m_config.cPUCT, m_config.fpuValue);
+                    float    score = Strategy::computeScore(m_nodeEdges[cIdx], parentVisits, m_nodePrior[cIdx], m_config.cPUCT, m_config.fpuValue);
                     if (score > bestScore) { bestScore = score; bestChild = cIdx; }
                 }
 
@@ -365,11 +304,7 @@ namespace Core
             }
         }
 
-        // ================================================================
-        // PHASE 2: BACKPROPAGATION
-        // ================================================================
-        void backprop(const Event& ctx)
-        {
+        void backprop(const Event& ctx) {
             const uint32_t leaf = ctx.leafNodeIdx;
 
             if (!ctx.collision) {
@@ -377,8 +312,7 @@ namespace Core
 
                 if (flags & FLAG_EXPANDING) {
                     if (ctx.validActions.empty() || ctx.isTerminal) {
-                        m_nodeFlags[leaf].val.store(
-                            FLAG_TERMINAL | FLAG_EXPANDED, std::memory_order_release);
+                        m_nodeFlags[leaf].val.store(FLAG_TERMINAL | FLAG_EXPANDED, std::memory_order_release);
                     }
                     else {
                         const uint32_t nChildren = static_cast<uint32_t>(ctx.validActions.size());
@@ -388,25 +322,19 @@ namespace Core
                             for (uint32_t i = 0; i < nChildren; ++i) {
                                 m_nodeAction[startIdx + i] = ctx.validActions[i];
                                 uint32_t aId = m_engine->actionToIdx(ctx.validActions[i]);
-                                m_nodePrior[startIdx + i] =
-                                    (aId < Defs::kActionSpace) ? ctx.policy[aId] : 0.0f;
+                                m_nodePrior[startIdx + i] = (aId < Defs::kActionSpace) ? ctx.policy[aId] : 0.0f;
                                 m_nodeFlags[startIdx + i].val.store(FLAG_NONE, std::memory_order_relaxed);
                             }
-
                             m_nodeFirstChild[leaf] = startIdx;
-                            m_nodeNumChildren[leaf].val.store(
-                                static_cast<uint16_t>(nChildren), std::memory_order_relaxed);
+                            m_nodeNumChildren[leaf].val.store(static_cast<uint16_t>(nChildren), std::memory_order_relaxed);
 
-                            // Appliquer l'exploration à la racine si c'est la toute première fois
-                            if (leaf == m_rootIdx) {
-                                applyRootExploration(leaf);
-                            }
+                            if (leaf == m_rootIdx) applyRootExploration(leaf);
 
-                            m_nodeFlags[leaf].val.store(FLAG_EXPANDED, std::memory_order_release);
+                            m_nodeFlags[leaf].val.fetch_or(FLAG_EXPANDED, std::memory_order_release);
                         }
                         else {
-                            m_nodeFlags[leaf].val.store(
-                                FLAG_NONE, std::memory_order_release);
+                            m_nodeNumChildren[leaf].val.store(0, std::memory_order_relaxed);
+                            m_nodeFlags[leaf].val.store(FLAG_EXPANDED, std::memory_order_release);
                         }
                     }
                 }
@@ -414,12 +342,10 @@ namespace Core
 
             std::array<float, Defs::kNumPlayers> scalars{};
             if (ctx.isTerminal) {
-                for (size_t p = 0; p < Defs::kNumPlayers; ++p)
-                    scalars[p] = ctx.scalarValue(p, false);
+                for (size_t p = 0; p < Defs::kNumPlayers; ++p) scalars[p] = ctx.scalarValue(p, false);
             }
             else {
                 for (size_t p = 0; p < Defs::kNumPlayers; ++p) {
-                    // p est l'index relatif dans nnWDL. On calcule à quel joueur absolu cela correspond.
                     uint32_t absPlayer = (ctx.leafViewer + p) % Defs::kNumPlayers;
                     scalars[absPlayer] = ctx.scalarValue(p, true);
                 }
@@ -435,17 +361,11 @@ namespace Core
                     Strategy::update(m_nodeEdges[nodeIdx], scalars[playerWhoMoved]);
             }
 
-            if (ctx.collision)
-                m_simulationsLaunched.fetch_sub(1, std::memory_order_relaxed);
-            else
-                m_simulationsFinished.fetch_add(1, std::memory_order_release);
+            if (ctx.collision) m_simulationsLaunched.fetch_sub(1, std::memory_order_relaxed);
+            else m_simulationsFinished.fetch_add(1, std::memory_order_release);
         }
 
-        // ================================================================
-        // UTILITIES
-        // ================================================================
-        void advanceRoot(const Action& actionPlayed, const State& newState)
-        {
+        void advanceRoot(const Action& actionPlayed, const State& newState) {
             m_realHistory.push_back(actionPlayed);
             m_realHashHistory.push_back(newState.hash());
 
@@ -461,8 +381,6 @@ namespace Core
                             m_rootState = newState;
                             resetCounters();
                             reused = true;
-                            // Application sécurisée du bruit de Gumbel
-                            // (sera ignoré si FLAG_GUMBEL_APPLIED est déjà défini)
                             applyRootExploration(m_rootIdx);
                             break;
                         }
@@ -472,20 +390,19 @@ namespace Core
             if (!reused) startSearch(newState, m_realHashHistory);
         }
 
-        // ----------------------------------------------------------------
-        [[nodiscard]] Action selectMove(float temperature)
-        {
+        [[nodiscard]] Action selectMove(float temperature) {
             if (m_rootIdx == UINT32_MAX) return Action{};
             uint32_t num = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
-            if (num == 0) return Action{};
+            if (num == 0 || num > Defs::kMaxValidActions) return Action{};
 
             uint32_t start = m_nodeFirstChild[m_rootIdx];
-            std::vector<double> weights(num);
+
+            // OPTIMISATION : Allocation statique sur la pile pour les poids
+            std::array<double, Defs::kMaxValidActions> weights;
             double sum = 0.0;
 
             for (uint32_t i = 0; i < num; ++i) {
-                double count = static_cast<double>(
-                    Strategy::getPolicyMetric(m_nodeEdges[start + i]));
+                double count = static_cast<double>(Strategy::getPolicyMetric(m_nodeEdges[start + i]));
                 double w = (temperature < 1e-3f) ? count : std::pow(count, 1.0 / temperature);
                 weights[i] = w;
                 sum += w;
@@ -508,9 +425,7 @@ namespace Core
             return m_nodeAction[start + num - 1];
         }
 
-        // ----------------------------------------------------------------
-        [[nodiscard]] float getRootValue() const
-        {
+        [[nodiscard]] float getRootValue() const {
             if (m_rootIdx == UINT32_MAX) return 0.0f;
             uint32_t num = m_nodeNumChildren[m_rootIdx].val.load(std::memory_order_relaxed);
             if (num == 0) return 0.0f;
@@ -528,9 +443,7 @@ namespace Core
             return (totalVisits < 1.0f) ? 0.0f : (weightedSum / totalVisits);
         }
 
-        // ----------------------------------------------------------------
-        [[nodiscard]] std::array<float, Defs::kActionSpace> getRootPolicy() const
-        {
+        [[nodiscard]] std::array<float, Defs::kActionSpace> getRootPolicy() const {
             std::array<float, Defs::kActionSpace> pol{};
             pol.fill(0.0f);
 
@@ -541,16 +454,10 @@ namespace Core
 
             if (m_config.gumbelCScale > 0.0f) {
                 Strategy::computeImprovedPolicy(
-                    start, num,
-                    m_nodePrior.data(),
-                    m_nodeEdges.data(),
-                    m_config.gumbelCVisit,
-                    m_config.gumbelCScale,
-                    [this, start](uint32_t offset) -> uint32_t {
-                        return m_engine->actionToIdx(m_nodeAction[start + offset]);
-                    },
-                    Defs::kActionSpace,
-                    pol.data());
+                    start, num, m_nodePrior.data(), m_nodeEdges.data(),
+                    m_config.gumbelCVisit, m_config.gumbelCScale,
+                    [this, start](uint32_t offset) -> uint32_t { return m_engine->actionToIdx(m_nodeAction[start + offset]); },
+                    Defs::kActionSpace, pol.data());
             }
             else {
                 for (uint32_t i = 0; i < num; ++i) {
@@ -562,8 +469,7 @@ namespace Core
             return pol;
         }
 
-        [[nodiscard]] std::array<bool, Defs::kActionSpace> getRootLegalMovesMask() const
-        {
+        [[nodiscard]] std::array<bool, Defs::kActionSpace> getRootLegalMovesMask() const {
             std::array<bool, Defs::kActionSpace> mask{};
             mask.fill(false);
             if (m_rootIdx == UINT32_MAX) return mask;
@@ -576,10 +482,8 @@ namespace Core
             return mask;
         }
 
-        [[nodiscard]] float getMemoryUsage() const
-        {
-            return static_cast<float>(m_nodeCount.load(std::memory_order_relaxed))
-                / static_cast<float>(m_config.maxNodes);
+        [[nodiscard]] float getMemoryUsage() const {
+            return static_cast<float>(m_nodeCount.load(std::memory_order_relaxed)) / static_cast<float>(m_config.maxNodes);
         }
     };
 }

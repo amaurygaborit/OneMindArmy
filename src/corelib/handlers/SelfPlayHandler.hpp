@@ -158,7 +158,6 @@ namespace Core
             else
                 std::cout << "[SelfPlay] Draw filter   : disabled\n";
 
-            // ---- Allocate game contexts ----
             std::vector<GameContext> games(m_backendCfg.numParallelGames);
             size_t treeAllocIdx = 0;
             for (auto& g : games) {
@@ -182,18 +181,20 @@ namespace Core
 
             auto startTime = std::chrono::high_resolution_clock::now();
 
-            while (gamesWritten < target &&
-                g_keepRunning.load(std::memory_order_acquire))
+            // OPTIMISATION: Alloué une seule fois en dehors de la boucle
+            std::vector<TreeSearch<GT>*> activeTrees;
+            activeTrees.reserve(m_backendCfg.numParallelGames);
+
+            while (gamesWritten < target && g_keepRunning.load(std::memory_order_acquire))
             {
-                std::vector<TreeSearch<GT>*> activeTrees;
-                activeTrees.reserve(m_backendCfg.numParallelGames);
+                activeTrees.clear(); // Réutilisation propre sans réallocation
+
                 for (auto& g : games) {
                     uint32_t cp = this->m_engine->getCurrentPlayer(g.currentState);
                     activeTrees.push_back(g.trees[cp]);
                 }
 
-                this->m_threadPool->executeMultipleTrees(
-                    activeTrees, this->m_engineCfg.numSimulations);
+                this->m_threadPool->executeMultipleTrees(activeTrees, this->m_engineCfg.numSimulations);
 
                 for (auto& g : games)
                 {
@@ -205,18 +206,18 @@ namespace Core
                         State povState = g.currentState;
                         this->m_engine->changeStatePov(cp, povState);
 
-                        const size_t histSize = std::min<size_t>(
-                            g.actionHistory.size(), Defs::kMaxHistory);
-                        AlignedVec<Action> povHistory(reserve_only, histSize);
-                        for (size_t i = g.actionHistory.size() - histSize;
-                            i < g.actionHistory.size(); ++i)
+                        const size_t histSize = std::min<size_t>(g.actionHistory.size(), Defs::kMaxHistory);
+
+                        // OPTIMISATION: Remplacement de AlignedVec par StaticVec pour supprimer l'allocation sur le tas
+                        StaticVec<Action, Defs::kMaxHistory> povHistory;
+
+                        for (size_t i = g.actionHistory.size() - histSize; i < g.actionHistory.size(); ++i)
                         {
                             Action a = g.actionHistory[i];
                             this->m_engine->changeActionPov(cp, a);
                             povHistory.push_back(a);
                         }
 
-                        // CORRECTION CRITIQUE ICI : Ajout du paramètre `cp`
                         g.replayBuffer.recordTurn(
                             StateEncoder<GT>::encode(povState, povHistory),
                             activeTree->getRootPolicy(),
@@ -237,8 +238,7 @@ namespace Core
 
                     gpuMoves++;
 
-                    std::optional<GameResult> outcome =
-                        this->m_engine->getGameResult(g.currentState, g.hashHistory);
+                    std::optional<GameResult> outcome = this->m_engine->getGameResult(g.currentState, g.hashHistory);
 
                     if (!outcome.has_value())
                         outcome = checkResign(g, cp);
@@ -260,10 +260,8 @@ namespace Core
                             if (gamesWritten % 10 == 0 || gamesWritten == target)
                             {
                                 auto   now = std::chrono::high_resolution_clock::now();
-                                double elapsed = std::chrono::duration<double>(
-                                    now - startTime).count();
-                                printProgress(gamesWritten, target, gamesPlayed,
-                                    writtenMoves, gpuMoves, elapsed);
+                                double elapsed = std::chrono::duration<double>(now - startTime).count();
+                                printProgress(gamesWritten, target, gamesPlayed, writtenMoves, gpuMoves, elapsed);
                             }
                         }
 
@@ -281,25 +279,19 @@ namespace Core
             int    mm = (static_cast<int>(sec) % 3600) / 60;
             int    ss = static_cast<int>(sec) % 60;
 
-            const double avgLen = (gamesWritten > 0)
-                ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
-            const double filterRate = (gamesWritten > 0)
-                ? static_cast<double>(gamesPlayed) / gamesWritten : 1.0;
+            const double avgLen = (gamesWritten > 0) ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
+            const double filterRate = (gamesWritten > 0) ? static_cast<double>(gamesPlayed) / gamesWritten : 1.0;
 
             std::cout << "\n\n[SelfPlay] Finished!"
                 << "\n  Games written     : " << gamesWritten
                 << "\n  Games played      : " << gamesPlayed
                 << "\n  Filter ratio      : x" << std::fixed << std::setprecision(2) << filterRate
                 << " (" << std::setprecision(1) << (100.0 / filterRate) << "% kept)"
-                << "\n  Avg Game Length   : " << std::fixed << std::setprecision(1)
-                << avgLen << " ply"
+                << "\n  Avg Game Length   : " << std::fixed << std::setprecision(1) << avgLen << " ply"
                 << "\n  GPU Moves (total) : " << gpuMoves
-                << "\n  Avg Speed         : " << std::fixed << std::setprecision(1)
-                << (gpuMoves / std::max(sec, 1e-6)) << " moves/s"
-                << "\n  Total Time        : "
-                << std::setfill('0') << std::setw(2) << hh << "h "
-                << std::setw(2) << mm << "m "
-                << std::setw(2) << ss << "s\n";
+                << "\n  Avg Speed         : " << std::fixed << std::setprecision(1) << (gpuMoves / std::max(sec, 1e-6)) << " moves/s"
+                << "\n  Total Time        : " << std::setfill('0') << std::setw(2) << hh << "h "
+                << std::setw(2) << mm << "m " << std::setw(2) << ss << "s\n";
         }
     };
 }

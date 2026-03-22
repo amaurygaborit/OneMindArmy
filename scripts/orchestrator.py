@@ -1,6 +1,5 @@
 import os
 import sys
-import yaml
 import json
 import time
 import shutil
@@ -9,8 +8,14 @@ import platform
 import subprocess
 import argparse
 import psutil
-import glob
 from pathlib import Path
+
+# On utilise ruamel.yaml pour PRESERVER les commentaires et le formatage
+try:
+    from ruamel.yaml import YAML
+except ImportError:
+    print("[Fatal] Le module 'ruamel.yaml' est requis. Lancez: pip install ruamel.yaml")
+    sys.exit(1)
 
 
 # ==============================================================================
@@ -37,7 +42,9 @@ class OneMindArmyPipeline:
             logger.error(f"Configuration file not found: {self.config_path}")
             sys.exit(1)
 
-        self.config    = self._load_config()
+        self.yaml_handler = YAML()
+        self.yaml_handler.preserve_quotes = True
+        self.config = self._load_config()
         self.game_name = self.config.get("name", "unknown_game")
 
         # ------------------------------------------------------------------
@@ -69,25 +76,23 @@ class OneMindArmyPipeline:
         self.models_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
-    # Config helpers — preserve key order when writing back to YAML
+    # Config helpers (Ruamel YAML)
     # ------------------------------------------------------------------
 
     def _load_config(self) -> dict:
-        with open(self.config_path, "r") as f:
-            return yaml.safe_load(f)
-
-    def _save_config(self, cfg: dict):
-        """Write config back to YAML while preserving key order."""
-        with open(self.config_path, "w") as f:
-            yaml.dump(cfg, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            return self.yaml_handler.load(f)
 
     def update_config_iteration(self, iteration: int):
-        """Inject currentIteration into the YAML so C++ names the output file correctly."""
+        """Inject currentIteration into YAML PRESERVING comments and layout."""
         cfg = self._load_config()
         if "training" not in cfg:
             cfg["training"] = {}
         cfg["training"]["currentIteration"] = iteration
-        self._save_config(cfg)
+        
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            self.yaml_handler.dump(cfg, f)
+            
         # Keep in-memory copy in sync
         self.config = cfg
 
@@ -96,7 +101,6 @@ class OneMindArmyPipeline:
     # ------------------------------------------------------------------
 
     def run_command(self, cmd_list: list, phase_name: str) -> float:
-        """Run a subprocess and return elapsed seconds. Exits on failure."""
         cmd_str = " ".join(str(x) for x in cmd_list)
         logger.info(f"--- START : {phase_name} ---")
         logger.debug(f"Command: {cmd_str}")
@@ -113,9 +117,8 @@ class OneMindArmyPipeline:
         return elapsed
 
     def wait_for_vram_cleanup(self, timeout_sec: int = 15) -> bool:
-        """Poll nvidia-smi until no compute processes are running."""
         if not shutil.which("nvidia-smi"):
-            return True  # No nvidia-smi available (CPU-only system)
+            return True
 
         logger.info("[CleanUp] Waiting for GPU VRAM release...")
         deadline = time.time() + timeout_sec
@@ -140,7 +143,6 @@ class OneMindArmyPipeline:
         return False
 
     def ensure_process_terminated(self):
-        """Kill any leftover C++ engine processes (zombie guard)."""
         for proc in psutil.process_iter(["name", "pid"]):
             try:
                 if proc.info["name"] == self.exe_name:
@@ -154,37 +156,34 @@ class OneMindArmyPipeline:
                 pass
 
     # ------------------------------------------------------------------
-    # Sliding window — sample-based deletion
+    # Sliding window — Centralized Logic
     # ------------------------------------------------------------------
 
     def enforce_sliding_window(self):
         """
-        Delete the oldest iteration_*.bin files until the total sample count
-        is within `slidingWindowSamples` (read from YAML training section).
-        Dynamically reads sizeofTrainingSample from meta.json to support WDL struct changes.
+        Delete oldest files based on BOTH sample limit and maximum file count (iterations).
+        Centralizes the sliding window logic here instead of doing it in train.py.
         """
-        max_samples = self.config.get("training", {}).get("slidingWindowSamples", 7_500_000)
+        training_cfg = self.config.get("training", {})
+        max_samples = training_cfg.get("slidingWindowSamples", 7_500_000)
+        max_files = training_cfg.get("maxWindowIterations", 10)
 
         meta_files = sorted(self.data_dir.glob("*.meta.json"))
         if not meta_files:
             logger.warning("[SlidingWindow] meta.json not found — skipping window enforcement.")
             return
 
-        # Try to find the canonical meta.json
         canonical_meta = self.data_dir / f"{self.game_name}_training_data.bin.meta.json"
         meta_path = canonical_meta if canonical_meta.exists() else meta_files[0]
 
-        with open(meta_path, "r") as f:
+        with open(meta_path, "r", encoding="utf-8") as f:
             meta = json.load(f)
 
         struct_size = meta.get("sizeofTrainingSample")
         if not struct_size:
-            logger.warning(
-                "[SlidingWindow] 'sizeofTrainingSample' missing in meta.json — skipping."
-            )
+            logger.warning("[SlidingWindow] 'sizeofTrainingSample' missing in meta.json — skipping.")
             return
 
-        # Sort oldest → newest
         bin_files = sorted(
             self.data_dir.glob("iteration_*.bin"), 
             key=lambda x: int(x.stem.split('_')[1])
@@ -192,48 +191,43 @@ class OneMindArmyPipeline:
         if not bin_files:
             return
 
-        file_stats = [
-            (f, f.stat().st_size // struct_size) for f in bin_files
-        ]
+        file_stats = [(f, f.stat().st_size // struct_size) for f in bin_files]
         total_samples = sum(s for _, s in file_stats)
 
         logger.info(
-            f"[SlidingWindow] Buffer: {total_samples:,} / {max_samples:,} samples  "
-            f"({len(file_stats)} file(s))"
+            f"[SlidingWindow] State before cleanup: {total_samples:,} samples | {len(file_stats)} files. "
+            f"(Limits: max_samples={max_samples:,}, max_files={max_files})"
         )
 
         deleted = 0
-        while total_samples > max_samples and len(file_stats) > 1:
+        # Condition de suppression centralisée: trop de samples OU trop de fichiers
+        while (total_samples > max_samples or len(file_stats) > max_files) and len(file_stats) > 1:
             oldest_file, oldest_count = file_stats.pop(0)
             try:
                 os.remove(oldest_file)
                 total_samples -= oldest_count
                 deleted += 1
                 logger.info(
-                    f"[SlidingWindow] Deleted {oldest_file.name}  "
-                    f"(-{oldest_count:,} samples → {total_samples:,} remaining)"
+                    f"[SlidingWindow] Deleted {oldest_file.name} "
+                    f"(-{oldest_count:,} samples → {total_samples:,} remaining, {len(file_stats)} files left)"
                 )
             except OSError as e:
                 logger.error(f"[SlidingWindow] Could not delete {oldest_file.name}: {e}")
                 break
 
         if deleted:
-            logger.info(f"[SlidingWindow] Removed {deleted} file(s). Buffer now at {total_samples:,} samples.")
+            logger.info(f"[SlidingWindow] Cleanup complete. Removed {deleted} file(s).")
 
     # ------------------------------------------------------------------
     # Resume detection
     # ------------------------------------------------------------------
 
     def get_start_iteration(self) -> int:
-        """
-        Detect the last completed iteration from existing data files
-        so the pipeline can resume without replaying work.
-        """
         bin_files = sorted(self.data_dir.glob("iteration_*.bin"))
         if not bin_files:
             return 1
 
-        last_stem = bin_files[-1].stem          # e.g. "iteration_0016"
+        last_stem = bin_files[-1].stem
         try:
             last_iter = int(last_stem.split("_")[1])
             logger.info(
@@ -242,10 +236,6 @@ class OneMindArmyPipeline:
             )
             return last_iter + 1
         except (IndexError, ValueError):
-            logger.warning(
-                f"[AutoResume] Could not parse iteration number from '{last_stem}'. "
-                "Starting from iteration 1."
-            )
             return 1
 
     # ------------------------------------------------------------------
@@ -281,13 +271,10 @@ class OneMindArmyPipeline:
             f"{'='*60}"
         )
 
-        # On garde le nom "best_model.plan" par compatibilité avec ton init_v0.py,
-        # mais conceptuellement, c'est simplement le "deployed_model".
         best_model_name = "best_model.plan"
         best_model_path  = self.models_dir / best_model_name
         latest_model_path = self.models_dir / "latest_model.plan"
 
-        # Bootstrap if no TRT engine exists yet
         if not best_model_path.exists():
             logger.warning(f"No '{best_model_name}' found — running v0 initialization ...")
             self.phase_bootstrap()
@@ -304,24 +291,16 @@ class OneMindArmyPipeline:
                 f"{'='*60}"
             )
 
-            # 0. Stamp the iteration number into the YAML (C++ reads it to name its output)
             self.update_config_iteration(iteration)
 
-            # 1. Self-play (C++ / TensorRT)
             self.phase_self_play(best_model_name)
             self.wait_for_vram_cleanup()
 
-            # 2. Trim replay buffer to stay within sample budget
             self.enforce_sliding_window()
 
-            # 3. Train (Python / PyTorch)
             self.phase_train()
             self.wait_for_vram_cleanup()
 
-            # 4. Unconditional Promotion (AlphaZero Continuous Training)
-            # Following DeepMind's final AlphaZero paper and Leela Chess Zero,
-            # we DO NOT use a gating/tournament system. The newly trained network
-            # unconditionally replaces the previous one to prevent knowledge rejection.
             if latest_model_path.exists():
                 shutil.copy(latest_model_path, best_model_path)
                 logger.info(
@@ -329,10 +308,7 @@ class OneMindArmyPipeline:
                     f"(iteration {iteration} complete)"
                 )
             else:
-                logger.error(
-                    "latest_model.plan was not produced by train.py! "
-                    "Check the training logs above."
-                )
+                logger.error("latest_model.plan was not produced by train.py!")
                 sys.exit(1)
 
             iter_elapsed = time.time() - iter_start
@@ -346,10 +322,6 @@ class OneMindArmyPipeline:
             f"{'='*60}"
         )
 
-
-# ==============================================================================
-# --- ENTRY POINT ---
-# ==============================================================================
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OneMindArmy — Orchestrator")

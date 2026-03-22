@@ -43,27 +43,24 @@ namespace Core
         std::mutex               m_mainMutex;
         std::condition_variable  m_mainCV;
 
-        std::atomic<uint32_t>    m_starvationCount{ 0 };
-
-        static size_t qSize(const BackendConfig& cfg, size_t nNets, size_t extra)
-        {
-            return static_cast<size_t>(
-                cfg.numParallelGames * nNets * cfg.queueScale * 2) + extra;
+        static size_t calcPoolSize(const BackendConfig& cfg, size_t nNets) {
+            return static_cast<size_t>(cfg.numParallelGames * nNets * cfg.queueScale * 2) + 256;
         }
 
     public:
-        ThreadPool(std::shared_ptr<IEngine<GT>>                 engine,
+        ThreadPool(std::shared_ptr<IEngine<GT>> engine,
             AlignedVec<std::unique_ptr<NeuralNet<GT>>>&& nets,
             const BackendConfig& backendCfg,
             const EngineConfig& engineCfg)
             : m_engine(engine)
             , m_neuralNets(std::move(nets))
             , m_fastDrain(backendCfg.fastDrain)
-            , m_qReadyTrees(qSize(backendCfg, m_neuralNets.size(), 512))
-            , m_qFree(qSize(backendCfg, m_neuralNets.size(), 256))
-            , m_qEval(qSize(backendCfg, m_neuralNets.size(), 256))
-            , m_qBackprop(qSize(backendCfg, m_neuralNets.size(), 256))
-            , m_eventPool(reserve_only, qSize(backendCfg, m_neuralNets.size(), 256))
+            // L'astuce anti-deadlock absolue : Toutes les queues (sauf TreeTask) font EXACTEMENT la taille du pool
+            , m_qReadyTrees(calcPoolSize(backendCfg, m_neuralNets.size()) * 4) // Peut être inondée de tâches
+            , m_qFree(calcPoolSize(backendCfg, m_neuralNets.size()))
+            , m_qEval(calcPoolSize(backendCfg, m_neuralNets.size()))
+            , m_qBackprop(calcPoolSize(backendCfg, m_neuralNets.size()))
+            , m_eventPool(reserve_only, calcPoolSize(backendCfg, m_neuralNets.size()))
         {
             const size_t nCtx = m_eventPool.capacity();
             for (size_t i = 0; i < nCtx; ++i) {
@@ -76,9 +73,7 @@ namespace Core
 
             for (uint32_t g = 0; g < static_cast<uint32_t>(m_neuralNets.size()); ++g)
                 for (uint32_t k = 0; k < backendCfg.numInferenceThreads; ++k)
-                    m_workers.emplace_back(&ThreadPool::loopInference, this,
-                        static_cast<size_t>(g),
-                        backendCfg.inferenceBatchSize);
+                    m_workers.emplace_back(&ThreadPool::loopInference, this, static_cast<size_t>(g), backendCfg.inferenceBatchSize);
 
             for (uint32_t i = 0; i < backendCfg.numBackpropThreads; ++i)
                 m_workers.emplace_back(&ThreadPool::loopBackprop, this);
@@ -94,25 +89,21 @@ namespace Core
             for (auto& t : m_workers) if (t.joinable()) t.join();
         }
 
-        void executeMultipleTrees(const std::vector<TreeSearch<GT>*>& trees,
-            uint32_t numSims)
+        void executeMultipleTrees(const std::vector<TreeSearch<GT>*>& trees, uint32_t numSims)
         {
             if (trees.empty() || numSims == 0) return;
             for (auto* tree : trees) tree->resetCounters();
 
             const bool isSelfPlay = (trees.size() > 1);
 
-            // CORRECTION CRITIQUE 1 : Calculer le total des tâches AVANT de les enfiler
             uint32_t initialTasksTotal = 0;
             for (auto* tree : trees) {
                 initialTasksTotal += isSelfPlay ? 1 : std::min<uint32_t>(numSims, 32);
             }
 
-            // CORRECTION CRITIQUE 2 : Assigner le compteur AVANT de démarrer les tâches
-            // pour éviter la Race Condition où un thread finit sa tâche avant la fin de la boucle for.
-            m_pendingTasks.store(initialTasksTotal, std::memory_order_release);
+            // CORRECTION CRITIQUE : fetch_add empêche la Race Condition si plusieurs handlers appellent ThreadPool
+            m_pendingTasks.fetch_add(initialTasksTotal, std::memory_order_release);
 
-            // Maintenant, il est sûr de lâcher les tâches dans la nature
             for (auto* tree : trees) {
                 uint32_t initialThreads = isSelfPlay ? 1 : std::min<uint32_t>(numSims, 32);
                 for (uint32_t i = 0; i < initialThreads; ++i) {
@@ -120,14 +111,14 @@ namespace Core
                 }
             }
 
+            // Attente propre et isolée sur la condition
             std::unique_lock lock(m_mainMutex);
-            m_mainCV.wait(lock, [&] {
+            m_mainCV.wait(lock, [this] {
                 return m_pendingTasks.load(std::memory_order_acquire) == 0;
                 });
         }
 
-        void executeTreeSearch(TreeSearch<GT>* tree, uint32_t numSims)
-        {
+        void executeTreeSearch(TreeSearch<GT>* tree, uint32_t numSims) {
             executeMultipleTrees({ tree }, numSims);
         }
 
@@ -156,20 +147,15 @@ namespace Core
                 const bool needEval = tTask.tree->gather(*ctx);
                 EvalTask eTask{ tTask.tree, ctx, tTask.targetSims, tTask.isSelfPlay };
 
-                if (needEval) {
-                    m_qEval.push(eTask);
-                }
-                else {
-                    m_qBackprop.push(eTask);
-                }
+                if (needEval) m_qEval.push(eTask);
+                else          m_qBackprop.push(eTask);
             }
         }
 
         void loopInference(size_t gpuIdx, uint32_t configBatchSize)
         {
             if (cudaSetDevice(static_cast<int>(gpuIdx)) != cudaSuccess) {
-                std::cerr << "[ThreadPool] Fatal: cannot bind to GPU "
-                    << gpuIdx << "\n";
+                std::cerr << "[ThreadPool] Fatal: cannot bind to GPU " << gpuIdx << "\n";
                 return;
             }
 
@@ -182,12 +168,13 @@ namespace Core
             while (m_running)
             {
                 batchTasks.clear();
-                const size_t count = m_qEval.pop_batch(
-                    batchTasks, configBatchSize, std::chrono::microseconds(1000));
+                const size_t count = m_qEval.pop_batch(batchTasks, configBatchSize, std::chrono::microseconds(1000));
                 if (count == 0) continue;
 
                 batchInputs.clear();
                 batchOutputs.resize(count);
+
+                // Copie directe de l'entrée préparée vers le tampon contigu pour le GPU
                 for (const auto& task : batchTasks)
                     batchInputs.push_back(task.ctx->nnInput);
 
@@ -204,9 +191,7 @@ namespace Core
                     float maxLogit = -1e9f;
                     for (const auto& act : e->validActions) {
                         const uint32_t idx = m_engine->actionToIdx(act);
-                        if (idx < Defs::kActionSpace) {
-                            maxLogit = std::max(maxLogit, res.policy[idx]);
-                        }
+                        if (idx < Defs::kActionSpace) maxLogit = std::max(maxLogit, res.policy[idx]);
                     }
 
                     float sumExp = 0.0f;

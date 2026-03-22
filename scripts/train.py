@@ -286,7 +286,8 @@ def wdl_cross_entropy(wdl_logits: torch.Tensor,
 
 def run_training(config_path: str):
     # 1. Config ----------------------------------------------------------------
-    with open(config_path, "r") as f:
+    with open(config_path, "r", encoding="utf-8") as f:
+        # yaml.safe_load est suffisant ici car train.py ne modifie pas le fichier
         config = yaml.safe_load(f)
 
     game_name = config["name"]
@@ -298,19 +299,18 @@ def run_training(config_path: str):
         print(f"[Error] No dataset files in {data_dir}. Run Self-Play first!")
         return
 
+    # SUPPRESSION DE LA LOGIQUE DE FENÊTRE GLISSANTE ICI
+    # L'Orchestrateur garantit désormais que le dossier data/ ne contient 
+    # QUE les fichiers valides (limités par taille et/ou nombre d'itérations).
+
     hp = config["training"]
-    max_window = hp.get("maxWindowIterations", 10)
-    if len(bin_files) > max_window:
-        n = len(bin_files) - max_window
-        print(f"[Train] Sliding window: dropping {n} oldest file(s).")
-        bin_files = bin_files[-max_window:]
 
     # 3. Meta ------------------------------------------------------------------
     meta_path = data_dir / f"{game_name}_training_data.bin.meta.json"
     if not meta_path.exists():
         print(f"[Error] Meta file missing: {meta_path}")
         return
-    with open(meta_path, "r") as f:
+    with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
 
     num_players = meta["numPlayers"]
@@ -327,7 +327,6 @@ def run_training(config_path: str):
     current_iteration = hp.get("currentIteration",   0)
     log_every         = hp.get("logEveryNBatches",   100)
     
-    # NOUVEAU: Récupérer le drawSampleRate depuis la config pour l'Importance Sampling
     draw_sample_rate  = float(hp.get("drawSampleRate", 1.0))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -381,14 +380,14 @@ def run_training(config_path: str):
         progress = min(1.0, current_iteration / max(1.0, lr_decay_iters))
         cosine_decay = 0.5 * (1 + math.cos(math.pi * progress))
         current_iter_lr = (lr * lr_min_factor) + (lr - lr * lr_min_factor) * cosine_decay
-    else: # "constant" ou tout autre texte
+    else:
         current_iter_lr = lr
 
     for pg in optimizer.param_groups:
         pg["lr"] = current_iter_lr
 
     print(f"[Train] Global LR for iteration {current_iteration}: {current_iter_lr:.2e}")
-
+    
     # 9. Training loop ---------------------------------------------------------
     for epoch in range(epochs):
         model.train()

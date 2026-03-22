@@ -10,13 +10,17 @@
 namespace Core
 {
     // ========================================================================
-    // BLOCKING QUEUE (ring buffer, thread-safe)
+    // BLOCKING QUEUE (ring buffer, thread-safe, power-of-2 optimized)
     // ========================================================================
     template<typename T>
     class BlockingQueue
     {
-        AlignedVec<T> m_buffer;
+        // CORRECTION CRITIQUE : L'ordre de déclaration dicte l'ordre d'initialisation.
+        // m_capacity et m_mask DOIVENT être déclarés avant m_buffer.
         size_t        m_capacity;
+        size_t        m_mask;
+        AlignedVec<T> m_buffer;
+
         size_t        m_head = 0;
         size_t        m_tail = 0;
         size_t        m_count = 0;
@@ -27,10 +31,19 @@ namespace Core
         bool m_closed = false;
         bool m_fastDrain = false;
 
+        // Force la capacité à la puissance de 2 supérieure pour optimiser le wrap-around
+        static constexpr size_t nextPowerOf2(size_t n) {
+            size_t count = 0;
+            if (n && !(n & (n - 1))) return n;
+            while (n != 0) { n >>= 1; count += 1; }
+            return 1ULL << count;
+        }
+
     public:
         explicit BlockingQueue(size_t capacity)
-            : m_buffer(reserve_only, capacity, capacity)
-            , m_capacity(capacity)
+            : m_capacity(nextPowerOf2(capacity))
+            , m_mask(m_capacity - 1)
+            , m_buffer(reserve_only, m_capacity, m_capacity)
         {
         }
 
@@ -51,9 +64,11 @@ namespace Core
             std::unique_lock lock(m_mutex);
             m_cv_push.wait(lock, [this] { return m_count < m_capacity || m_closed; });
             if (m_closed) return false;
+
             m_buffer[m_tail] = item;
-            m_tail = (m_tail + 1) % m_capacity;
+            m_tail = (m_tail + 1) & m_mask;
             ++m_count;
+
             lock.unlock();
             m_cv_pop.notify_one();
             return true;
@@ -66,13 +81,16 @@ namespace Core
             m_cv_pop.wait_for(lock, timeout,
                 [this, maxItems] { return m_count >= maxItems || m_closed; });
             if (m_closed && (m_count == 0 || m_fastDrain)) return 0;
+
             size_t n = std::min(m_count, maxItems);
             if (n == 0) return 0;
+
             for (size_t i = 0; i < n; ++i) {
                 out.push_back(m_buffer[m_head]);
-                m_head = (m_head + 1) % m_capacity;
+                m_head = (m_head + 1) & m_mask;
             }
             m_count -= n;
+
             lock.unlock();
             m_cv_push.notify_all();
             return n;
@@ -83,9 +101,11 @@ namespace Core
             std::unique_lock lock(m_mutex);
             m_cv_pop.wait(lock, [this] { return m_count > 0 || m_closed; });
             if (m_closed && (m_count == 0 || m_fastDrain)) return false;
+
             out = m_buffer[m_head];
-            m_head = (m_head + 1) % m_capacity;
+            m_head = (m_head + 1) & m_mask;
             --m_count;
+
             lock.unlock();
             m_cv_push.notify_one();
             return true;
