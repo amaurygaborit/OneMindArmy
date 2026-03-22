@@ -239,14 +239,16 @@ def load_checkpoint(path, model, optimizer, device):
 
 def wdl_cross_entropy(wdl_logits: torch.Tensor,
                       target_wdl: torch.Tensor,
-                      num_players: int) -> torch.Tensor:
+                      num_players: int,
+                      draw_sample_rate: float = 1.0) -> torch.Tensor:
     """
-    Per-player soft cross-entropy for WDL targets.
+    Per-player soft cross-entropy for WDL targets, with Importance Sampling.
 
     Args:
-        wdl_logits : [B, num_players * 3]  — raw logits from value head
-        target_wdl : [B, num_players * 3]  — soft WDL targets from replay buffer
-        num_players: number of players
+        wdl_logits       : [B, num_players * 3]  — raw logits from value head
+        target_wdl       : [B, num_players * 3]  — soft WDL targets from replay buffer
+        num_players      : number of players
+        draw_sample_rate : proportion of draws kept during C++ generation (to correct bias)
 
     Returns:
         Scalar loss (mean over batch and players).
@@ -262,6 +264,19 @@ def wdl_cross_entropy(wdl_logits: torch.Tensor,
 
     # Soft cross-entropy: -sum(target * log_pred) over WDL classes
     loss = -(targets * log_probs).sum(dim=2)   # [B, num_players]
+
+    # --- CORRECTION: Importance Sampling pour les nulles ---
+    if draw_sample_rate < 1.0:
+        # L'index 1 du WDL (W=0, D=1, L=2) correspond à la partie nulle.
+        # On repère les échantillons qui sont des parties nulles (D > 0.5)
+        is_draw = (targets[:, :, 1] > 0.5).float()
+        
+        # Poids = 1.0 (parties décisives) ou 1.0/draw_sample_rate (parties nulles)
+        weights = 1.0 + is_draw * ((1.0 / draw_sample_rate) - 1.0)
+        
+        # Application du multiplicateur
+        loss = loss * weights
+
     return loss.mean()                         # scalar
 
 
@@ -311,6 +326,9 @@ def run_training(config_path: str):
     value_loss_weight = float(hp.get("valueLossWeight", 0.5))
     current_iteration = hp.get("currentIteration",   0)
     log_every         = hp.get("logEveryNBatches",   100)
+    
+    # NOUVEAU: Récupérer le drawSampleRate depuis la config pour l'Importance Sampling
+    draw_sample_rate  = float(hp.get("drawSampleRate", 1.0))
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -318,7 +336,7 @@ def run_training(config_path: str):
     print(f"[Train] Game: {game_name}  |  Iter: {current_iteration}")
     print(f"[Train] Device: {device}  |  Batch: {train_batch_size}  |  Epochs: {epochs}")
     print(f"[Train] LR: {lr} (Type: {lr_decay_type})  |  valueLossWeight: {value_loss_weight}")
-    print(f"[Train] Value loss: WDL cross-entropy (num_players={num_players})")
+    print(f"[Train] Value loss: WDL cross-entropy (num_players={num_players}, drawRate={draw_sample_rate})")
     print(f"{'='*60}\n")
 
     # 5. Logger ----------------------------------------------------------------
@@ -397,8 +415,8 @@ def run_training(config_path: str):
             pred_log_probs = torch.log_softmax(policy_logits, dim=-1)
             p_loss         = -(target_policies * pred_log_probs).sum(dim=1).mean()
 
-            # ---- Value loss (WDL per-player soft cross-entropy) ----
-            v_loss = wdl_cross_entropy(wdl_logits, target_wdl, num_players)
+            # ---- Value loss (WDL per-player soft cross-entropy + IMPORTANCE SAMPLING) ----
+            v_loss = wdl_cross_entropy(wdl_logits, target_wdl, num_players, draw_sample_rate)
 
             # ---- Total loss ----
             total_loss = p_loss + value_loss_weight * v_loss

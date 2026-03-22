@@ -185,7 +185,10 @@ class OneMindArmyPipeline:
             return
 
         # Sort oldest → newest
-        bin_files = sorted(self.data_dir.glob("iteration_*.bin"))
+        bin_files = sorted(
+            self.data_dir.glob("iteration_*.bin"), 
+            key=lambda x: int(x.stem.split('_')[1])
+        )
         if not bin_files:
             return
 

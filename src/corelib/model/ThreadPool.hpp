@@ -100,21 +100,25 @@ namespace Core
             if (trees.empty() || numSims == 0) return;
             for (auto* tree : trees) tree->resetCounters();
 
-            // On ne compte plus les "simulations totales absolues", 
-            // on compte simplement les "tâches en cours" lancées par ce thread.
-            uint32_t initialTasksTotal = 0;
             const bool isSelfPlay = (trees.size() > 1);
 
+            // CORRECTION CRITIQUE 1 : Calculer le total des tâches AVANT de les enfiler
+            uint32_t initialTasksTotal = 0;
+            for (auto* tree : trees) {
+                initialTasksTotal += isSelfPlay ? 1 : std::min<uint32_t>(numSims, 32);
+            }
+
+            // CORRECTION CRITIQUE 2 : Assigner le compteur AVANT de démarrer les tâches
+            // pour éviter la Race Condition où un thread finit sa tâche avant la fin de la boucle for.
+            m_pendingTasks.store(initialTasksTotal, std::memory_order_release);
+
+            // Maintenant, il est sûr de lâcher les tâches dans la nature
             for (auto* tree : trees) {
                 uint32_t initialThreads = isSelfPlay ? 1 : std::min<uint32_t>(numSims, 32);
-                initialTasksTotal += initialThreads;
-
                 for (uint32_t i = 0; i < initialThreads; ++i) {
                     m_qReadyTrees.push({ tree, numSims, isSelfPlay });
                 }
             }
-
-            m_pendingTasks.store(initialTasksTotal, std::memory_order_release);
 
             std::unique_lock lock(m_mainMutex);
             m_mainCV.wait(lock, [&] {
@@ -137,9 +141,8 @@ namespace Core
             {
                 if (!m_qReadyTrees.pop(tTask)) break;
 
-                // Stop condition stricte basée sur les simulations VALIDEES.
                 if (tTask.tree->getSimulationCount() >= tTask.targetSims) {
-                    notifyTaskDone(); // Cette "branche" du Swarm meurt proprement
+                    notifyTaskDone();
                     continue;
                 }
 
@@ -196,11 +199,8 @@ namespace Core
                     Event* e = eTask.ctx;
                     const ModelResults& res = batchOutputs[i];
 
-                    // --- MODIFICATION WDL Copie sécurisée ---
-                    // Affectation directe, car les deux sont std::array<float, kNumPlayers * 3>
                     e->nnWDL = res.values;
 
-                    // --- SOFTMAX NUMÉRIQUEMENT STABLE (Safe Log-Sum-Exp trick) ---
                     float maxLogit = -1e9f;
                     for (const auto& act : e->validActions) {
                         const uint32_t idx = m_engine->actionToIdx(act);
@@ -213,14 +213,11 @@ namespace Core
                     for (const auto& act : e->validActions) {
                         const uint32_t idx = m_engine->actionToIdx(act);
                         if (idx < Defs::kActionSpace) {
-                            // On décale tous les logits par rapport au max avant l'exp()
-                            // Évite l'overflow sur des gros logits et l'underflow destructif
                             e->policy[idx] = std::exp(res.policy[idx] - maxLogit);
                             sumExp += e->policy[idx];
                         }
                     }
 
-                    // --- NORMALISATION ---
                     if (sumExp > 1e-9f) {
                         const float inv = 1.0f / sumExp;
                         for (const auto& act : e->validActions) {
@@ -229,7 +226,6 @@ namespace Core
                         }
                     }
                     else if (!e->validActions.empty()) {
-                        // Filet de sécurité si la somme est nulle (ne devrait jamais arriver avec maxLogit)
                         const float uni = 1.0f / static_cast<float>(e->validActions.size());
                         for (const auto& act : e->validActions) {
                             const uint32_t idx = m_engine->actionToIdx(act);
@@ -249,18 +245,13 @@ namespace Core
             {
                 if (!m_qBackprop.pop(eTask)) break;
 
-                // Mise à jour de l'arbre
                 eTask.tree->backprop(*(eTask.ctx));
-                m_qFree.push(eTask.ctx); // Libération
+                m_qFree.push(eTask.ctx);
 
-                // Est-ce que l'arbre a encore besoin de travail ?
                 if (eTask.tree->getSimulationCount() < eTask.targetSims) {
-                    // Oui, on réinjecte LA MÊME TÂCHE dans la boucle pour qu'elle continue
                     m_qReadyTrees.push({ eTask.tree, eTask.targetSims, eTask.isSelfPlay });
                 }
                 else {
-                    // Non, l'arbre a fini ses 800 simulations valides.
-                    // Cette tâche "meurt" ici.
                     notifyTaskDone();
                 }
             }

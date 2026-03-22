@@ -191,9 +191,10 @@ namespace Core
             if (m_config.gumbelK == 0) return;
 
             // Vérifier si Gumbel a déjà été appliqué sur ce nœud
-            uint8_t flags = m_nodeFlags[nodeIdx].val.load(std::memory_order_acquire);
-            if (flags & FLAG_GUMBEL_APPLIED) return;
+            uint8_t old_flags = m_nodeFlags[nodeIdx].val.fetch_or(FLAG_GUMBEL_APPLIED, std::memory_order_acq_rel);
+            if (old_flags & FLAG_GUMBEL_APPLIED) return; // Un autre thread l'a déjà fait
 
+            // Seul le thread ayant basculé le bit arrive ici
             uint32_t nChildren = m_nodeNumChildren[nodeIdx].val.load(std::memory_order_relaxed);
             if (nChildren == 0) return;
 
@@ -203,9 +204,6 @@ namespace Core
                 startIdx, nChildren,
                 m_nodePrior.data(),
                 m_config.gumbelK);
-
-            // Verrouiller ce nœud pour ne plus jamais lui appliquer de bruit
-            m_nodeFlags[nodeIdx].val.fetch_or(FLAG_GUMBEL_APPLIED, std::memory_order_release);
         }
 
         // ----------------------------------------------------------------
@@ -398,16 +396,17 @@ namespace Core
                             m_nodeFirstChild[leaf] = startIdx;
                             m_nodeNumChildren[leaf].val.store(
                                 static_cast<uint16_t>(nChildren), std::memory_order_relaxed);
-                            m_nodeFlags[leaf].val.store(FLAG_EXPANDED, std::memory_order_release);
 
                             // Appliquer l'exploration à la racine si c'est la toute première fois
                             if (leaf == m_rootIdx) {
                                 applyRootExploration(leaf);
                             }
+
+                            m_nodeFlags[leaf].val.store(FLAG_EXPANDED, std::memory_order_release);
                         }
                         else {
                             m_nodeFlags[leaf].val.store(
-                                FLAG_TERMINAL | FLAG_EXPANDED, std::memory_order_release);
+                                FLAG_NONE, std::memory_order_release);
                         }
                     }
                 }
