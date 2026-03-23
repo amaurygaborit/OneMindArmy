@@ -44,8 +44,8 @@ training:
 
 backend:
   numGPUs: auto
-  inferenceBatchSize: 4096
-  numParallelGames: 16384
+  inferenceBatchSize: 2048
+  numParallelGames: 8192
 
   precision: fp16
   numSearchThreads: 23

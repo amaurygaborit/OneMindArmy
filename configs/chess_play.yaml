@@ -6,20 +6,20 @@
 name: chess
 
 engine:
-  numSimulations: 5000
+  numSimulations: 1000
   maxDepth: 128
 
   cPUCT: 1.5
-  fpuValue: 0.0            # Assume unknown moves are neutral instead of bad
+  fpuValue: 0.25            # Assume unknown moves are neutral instead of bad
   virtualLoss: 2.0         # Lower penalty needed for single game
 
-  gumbelK: 0
-  gumbelCVisit: 0.0
-  gumbelCScale: 0.0
+  gumbelK: 8
+  gumbelCVisit: 50.0
+  gumbelCScale: 1.0
 
   maxNodes: 1000000           # Allow the tree to grow huge for one game
   memoryThreshold: 0.90
-  reuseTree: true         # Reuse tree between turns to think on opponent's time
+  reuseTree: false         # Reuse tree between turns to think on opponent's time
 
   resignThreshold: -0.95
   resignMinPly: 200
@@ -47,7 +47,7 @@ session:
   verbose: true
 
   renderState: true
-  renderValidActions: true
+  renderValidActions: false
   renderActionPlayed: true
   renderResult: true
 

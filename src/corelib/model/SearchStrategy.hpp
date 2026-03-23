@@ -79,11 +79,16 @@ namespace Core
         }
 
         // ====================================================================
-        // GUMBEL-TOP-K ROOT SAMPLING (Zero Allocation)
+        // GUMBEL-TOP-K ROOT SAMPLING (Zero Allocation & Fixed Bypass)
         // ====================================================================
-        static void applyGumbelTopK(uint32_t startIdx, uint32_t nChildren, float* priors, uint32_t k)
+        static void applyGumbelTopK(uint32_t startIdx, uint32_t nChildren, float* priors, uint32_t k,
+            uint32_t* outActiveIndices, uint32_t& outActiveCount)
         {
-            if (k == 0 || k >= nChildren || nChildren > Defs::kMaxValidActions) return;
+            if (nChildren == 0 || nChildren > Defs::kMaxValidActions) return;
+
+            // FIX: Gère correctement le cas où k >= nChildren sans ignorer Gumbel
+            uint32_t actualK = std::min(k, nChildren);
+            if (actualK == 0) actualK = nChildren;
 
             thread_local std::mt19937 rng{ std::random_device{}() };
             std::uniform_real_distribution<float> udist(1e-8f, 1.0f);
@@ -94,29 +99,33 @@ namespace Core
             for (uint32_t i = 0; i < nChildren; ++i) {
                 const float u = udist(rng);
                 const float gumbel = -std::log(-std::log(u));
-                const float logPrior = (priors[startIdx + i] > 1e-9f) ? std::log(priors[startIdx + i]) : -1e9f;
+                const float prior = priors[startIdx + i];
+                const float logPrior = (prior > 1e-9f) ? std::log(prior) : -1e9f;
                 scores[i] = { gumbel + logPrior, i };
             }
 
-            std::partial_sort(scores.begin(), scores.begin() + k, scores.begin() + nChildren,
+            // Tri in-place du Top-K
+            std::partial_sort(scores.begin(), scores.begin() + actualK, scores.begin() + nChildren,
                 [](const auto& a, const auto& b) { return a.first > b.first; });
 
-            // OPTIMISATION : Allocation sur la pile et initialisation à false
             std::array<bool, Defs::kMaxValidActions> selected{};
-            for (uint32_t i = 0; i < k; ++i) {
+            for (uint32_t i = 0; i < actualK; ++i) {
                 selected[scores[i].second] = true;
+                if (outActiveIndices) outActiveIndices[i] = scores[i].second;
             }
+            outActiveCount = actualK;
 
             float selectedSum = 0.0f;
             for (uint32_t i = 0; i < nChildren; ++i) {
                 if (!selected[i]) {
-                    priors[startIdx + i] = 0.0f;
+                    priors[startIdx + i] = 0.0f; // Tue les branches non Top-K
                 }
                 else {
                     selectedSum += priors[startIdx + i];
                 }
             }
 
+            // Renormalisation du prior du Top-K
             if (selectedSum > 1e-9f) {
                 const float invSum = 1.0f / selectedSum;
                 for (uint32_t i = 0; i < nChildren; ++i) {
@@ -148,7 +157,6 @@ namespace Core
             const float safeScale = (cScale > 1e-5f) ? cScale : 1.0f;
             const float sigma = (cVisit + maxN) / safeScale;
 
-            // OPTIMISATION : Allocation sur la pile
             std::array<float, Defs::kMaxValidActions> logits;
             float maxLogit = -std::numeric_limits<float>::max();
 

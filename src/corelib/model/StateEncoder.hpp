@@ -84,10 +84,11 @@ namespace Core
         // [ kMaxElems ... kMaxFacts-1] -> Metas (Rules, Turns, Scores)
         // [ kMaxFacts ... end ]        -> History (Action(t), Action(t-1), ...)
         // ------------------------------------------------------------------------
-        static inline std::array<float, Defs::kNNInputSize> encode(const State& state, std::span<const Action> history) noexcept
+        static inline void encode(const State& state, std::span<const Action> history,
+            std::array<float, Defs::kNNInputSize>& out) noexcept
         {
-            std::array<float, Defs::kNNInputSize> nnInput{};
-            float* baseCursor = nnInput.data();
+            out.fill(0.0f);
+            float* baseCursor = out.data();
 
             // 1. Encode all Board Facts (Elements + Metas)
             // state.all() returns the fixed-size underlying memory span. 
@@ -110,8 +111,6 @@ namespace Core
                 float* tokenCursor = historyCursor + (i * Defs::kTokenDim);
                 encodeAction(action, tokenCursor);
             }
-
-            return nnInput;
         }
     };
 }

@@ -92,7 +92,12 @@ namespace Core
             // 1. Filtrage des parties nulles
             if (drawSampleRate < 1.0f)
             {
-                const bool isDraw = (finalOutcome.wdl[0 * 3 + 1] > 0.5f);
+                const bool isDraw = [&]() {
+                    for (uint32_t p = 0; p < Defs::kNumPlayers; ++p)
+                        if (finalOutcome.wdl[p * 3 + 0] > 0.5f) return false; // quelqu'un a gagné
+                    return true;
+                    }();
+
                 if (isDraw)
                 {
                     std::uniform_real_distribution<float> dist(0.0f, 1.0f);

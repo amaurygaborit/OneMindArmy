@@ -218,8 +218,12 @@ namespace Core
                             povHistory.push_back(a);
                         }
 
+                        std::array<float, Defs::kNNInputSize> encodedState;
+                        StateEncoder<GT>::encode(povState, povHistory, encodedState);
+
+                        // 3. Enregistrement
                         g.replayBuffer.recordTurn(
-                            StateEncoder<GT>::encode(povState, povHistory),
+                            encodedState,
                             activeTree->getRootPolicy(),
                             activeTree->getRootLegalMovesMask(),
                             cp

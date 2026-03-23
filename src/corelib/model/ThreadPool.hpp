@@ -55,8 +55,7 @@ namespace Core
             : m_engine(engine)
             , m_neuralNets(std::move(nets))
             , m_fastDrain(backendCfg.fastDrain)
-            // L'astuce anti-deadlock absolue : Toutes les queues (sauf TreeTask) font EXACTEMENT la taille du pool
-            , m_qReadyTrees(calcPoolSize(backendCfg, m_neuralNets.size()) * 4) // Peut être inondée de tâches
+            , m_qReadyTrees(calcPoolSize(backendCfg, m_neuralNets.size()) * 4)
             , m_qFree(calcPoolSize(backendCfg, m_neuralNets.size()))
             , m_qEval(calcPoolSize(backendCfg, m_neuralNets.size()))
             , m_qBackprop(calcPoolSize(backendCfg, m_neuralNets.size()))
@@ -94,6 +93,7 @@ namespace Core
             if (trees.empty() || numSims == 0) return;
             for (auto* tree : trees) tree->resetCounters();
 
+            // S'il y a plus d'un arbre géré en batch, c'est du Self-Play, un thread par arbre suffit.
             const bool isSelfPlay = (trees.size() > 1);
 
             uint32_t initialTasksTotal = 0;
@@ -101,7 +101,6 @@ namespace Core
                 initialTasksTotal += isSelfPlay ? 1 : std::min<uint32_t>(numSims, 32);
             }
 
-            // CORRECTION CRITIQUE : fetch_add empêche la Race Condition si plusieurs handlers appellent ThreadPool
             m_pendingTasks.fetch_add(initialTasksTotal, std::memory_order_release);
 
             for (auto* tree : trees) {
@@ -111,7 +110,6 @@ namespace Core
                 }
             }
 
-            // Attente propre et isolée sur la condition
             std::unique_lock lock(m_mainMutex);
             m_mainCV.wait(lock, [this] {
                 return m_pendingTasks.load(std::memory_order_acquire) == 0;
@@ -143,6 +141,7 @@ namespace Core
                 }
 
                 tTask.tree->incrementLaunched();
+                ctx->isSelfPlay = tTask.isSelfPlay; // Propagation du flag pour Sequential Halving
 
                 const bool needEval = tTask.tree->gather(*ctx);
                 EvalTask eTask{ tTask.tree, ctx, tTask.targetSims, tTask.isSelfPlay };
@@ -164,7 +163,6 @@ namespace Core
             AlignedVec<EvalTask> batchTasks(reserve_only, configBatchSize);
             AlignedVec<ModelResults> batchOutputs(reserve_only, configBatchSize);
 
-            // NOUVEAU : Un simple tableau de pointeurs (très léger, aucune copie de tenseur)
             AlignedVec<const std::array<float, Defs::kNNInputSize>*> batchPtrs(reserve_only, configBatchSize);
 
             while (m_running)
@@ -176,7 +174,6 @@ namespace Core
                 batchPtrs.clear();
                 batchOutputs.resize(count);
 
-                // On ne stocke que l'adresse mémoire de l'input du context MCTS
                 for (const auto& task : batchTasks)
                     batchPtrs.push_back(&task.ctx->nnInput);
 
@@ -197,6 +194,7 @@ namespace Core
                     }
 
                     float sumExp = 0.0f;
+
                     for (const auto& act : e->validActions) {
                         const uint32_t idx = m_engine->actionToIdx(act);
                         if (idx < Defs::kActionSpace) {
