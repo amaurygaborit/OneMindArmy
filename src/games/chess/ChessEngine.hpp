@@ -15,8 +15,9 @@ namespace Chess
 
         bool isFiftyMoveRule(const State& state) const;
         bool isInsufficientMaterial(const State& state) const;
-
         bool ourKingInCheck(const State& state) const;
+
+        bool hasAnyLegalMove(const State& state) const;
 
     protected:
         void specificSetup(const YAML::Node& config) override;

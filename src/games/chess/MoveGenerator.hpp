@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include <bit>
+#include <cstring>
 
 #include "ChessTypes.hpp"
 #include "Tables.hpp"
@@ -20,11 +21,11 @@ namespace Chess
     static constexpr map RANK_5 = 0x000000FF00000000ULL;
 
     static ALWAYS_INLINE
-    int popLSB(uint64_t& bb) noexcept
+        int popLSB(uint64_t& bb) noexcept
     {
         if (bb == 0) return 0;
 
-        int idx = std::countr_zero(bb); 
+        int idx = std::countr_zero(bb);
         bb &= bb - 1;
         return idx;
     }
@@ -33,9 +34,6 @@ namespace Chess
     static ALWAYS_INLINE constexpr
         uint64_t nzmask(uint64_t x) noexcept
     {
-        // si x≠0 alors (x|-x) a son bit de signe à 1 → ((x|-x)>>63)==1
-        // sinon (x|-x)==0 → ((...)>>63)==0
-        // on a donc un bit 0/1 qu’on passe à deux’s‑complement pour obtenir 0 ou -1(=all‑ones).
         return -((x | -x) >> 63);
     }
 
@@ -155,9 +153,9 @@ namespace Chess
             return atk;
         }
 
-        // Calcule checkMask et pinners
+        // Calcule checkMask et pinners (OPTIMISATION int8_t)
         static ALWAYS_INLINE
-            void computeCheckAndPins(const Board& b, int* pinnerOf,
+            void computeCheckAndPins(const Board& b, int8_t* pinnerOf,
                 map& checkMask, int& checkCount, int kingSq) noexcept
         {
             // Pawns
@@ -220,13 +218,13 @@ namespace Chess
 
                 int xIdx = popLSB(x);
                 int pinnerIdx = sq * (int)exactlyOne - (1 - (int)exactlyOne);
-                pinnerOf[xIdx] = pinnerIdx;
+                pinnerOf[xIdx] = static_cast<int8_t>(pinnerIdx);
             }
         }
 
-        // Récupère le rayon de pin entre roi et pièce
+        // Récupère le rayon de pin entre roi et pièce (Accepte int8_t)
         static ALWAYS_INLINE
-            map getPinRay(const int* pinnerOf, int kingSq, int pieceSq) noexcept
+            map getPinRay(const int8_t* pinnerOf, int kingSq, int pieceSq) noexcept
         {
             int pinnerSq = pinnerOf[pieceSq];
             int rawIndex = kingSq * 64 + pinnerSq;
@@ -266,6 +264,7 @@ namespace Chess
 
     public:
         MoveGenerator() = default;
+
         static void countCheck(const StateBB& state, int& out) noexcept
         {
             Board b;
@@ -275,10 +274,186 @@ namespace Chess
             map checkMask = 0;
             out = 0;
 
-            int pinnerOf[64];
+            int8_t pinnerOf[64];
             std::memset(pinnerOf, -1, sizeof(pinnerOf));
 
             computeCheckAndPins(b, pinnerOf, checkMask, out, kingSq);
+        }
+
+        // ====================================================================
+        // EARLY EXIT OPTIMIZATION : bool hasAnyLegalMove()
+        // Permet de statuer sur le Mat/Pat sans générer tous les coups.
+        // ====================================================================
+        static bool hasAnyLegalMove(const StateBB& state) noexcept
+        {
+            Board b;
+            b.setBoard(state);
+
+            map tmp = b.ourKing;
+            int kingSq = popLSB(tmp);
+
+            map checkMask = 0;
+            int checkCount = 0;
+
+            int8_t pinnerOf[64];
+            std::memset(pinnerOf, -1, sizeof(pinnerOf));
+
+            computeCheckAndPins(b, pinnerOf, checkMask, checkCount, kingSq);
+            map atkSquares = computeAttacks(b);
+
+            // 1. Mouvements du Roi (Rapide, sauve du calcul si pas mat/pat)
+            map kingAtk = tables.kingMasks[kingSq] & (~b.ourOcc) & (~atkSquares);
+            if (kingAtk) return true;
+
+            // 2. Double Échec (Seul le roi peut bouger, or on vient de vérifier qu'il ne peut pas)
+            if (checkCount >= 2) return false;
+
+            // Normalisation du checkMask (Branch Predictor friendly)
+            if (!checkMask) checkMask = ~0ULL;
+
+            // 3. Cavaliers (Rapide, pas de calcul de rayon magique)
+            tmp = b.ourKnight;
+            while (tmp) {
+                int knightSq = popLSB(tmp);
+                map knightAtk = tables.knightMasks[knightSq] & (~b.ourOcc) & checkMask;
+                int v = pinnerOf[knightSq] + 1;
+                map pinMask = (map)((int64_t)(v - 1) >> 63);
+                if (knightAtk & pinMask) return true;
+            }
+
+            // 4. Pions (Très probables en milieu de partie)
+            int signPawn;
+            map singlePush, doublePush, capsL, capsR;
+
+            if constexpr (bs.isWhite) {
+                signPawn = -1;
+                singlePush = (b.ourPawn << 8) & (~b.occ) & checkMask;
+                doublePush = (singlePush << 8) & (~b.occ) & RANK_4 & checkMask;
+                capsL = ((b.ourPawn & ~FILE_A) << 7) & (b.oppOcc | b.enPassantBB) & checkMask;
+                capsR = ((b.ourPawn & ~FILE_H) << 9) & (b.oppOcc | b.enPassantBB) & checkMask;
+            }
+            else {
+                signPawn = 1;
+                singlePush = (b.ourPawn >> 8) & (~b.occ) & checkMask;
+                doublePush = (singlePush >> 8) & (~b.occ) & RANK_5 & checkMask;
+                capsL = ((b.ourPawn & ~FILE_A) >> 9) & (b.oppOcc | b.enPassantBB) & checkMask;
+                capsR = ((b.ourPawn & ~FILE_H) >> 7) & (b.oppOcc | b.enPassantBB) & checkMask;
+            }
+
+            map tmpPawn = singlePush;
+            while (tmpPawn) {
+                int to = popLSB(tmpPawn);
+                int from = to + signPawn * 8;
+                if ((1ULL << to) & getPinRay(pinnerOf, kingSq, from)) return true;
+            }
+
+            tmpPawn = doublePush;
+            while (tmpPawn) {
+                int to = popLSB(tmpPawn);
+                int from = to + signPawn * 16;
+                if ((1ULL << to) & getPinRay(pinnerOf, kingSq, from)) return true;
+            }
+
+            tmpPawn = capsL;
+            while (tmpPawn) {
+                int to = popLSB(tmpPawn);
+                int from = to + signPawn * 8 + 1;
+                map pawnAtk = 1ULL << to;
+                map pinMask = getPinRay(pinnerOf, kingSq, from);
+
+                if constexpr (bs.hasEnPassant) {
+                    map epCand = pawnAtk & b.enPassantBB;
+                    if (epCand) {
+                        int rowDiff = (from ^ kingSq) >> 3;
+                        map rowEq = (((map)rowDiff | (map)(-(int64_t)rowDiff)) >> 63) ^ 1ULL;
+                        map rowEqMask = (map)(-(int64_t)rowEq);
+                        map pawnSq = 1ULL << from;
+                        map capSq = 1ULL << (from - 1);
+                        map occ2 = b.occ & ~(pawnSq | capSq);
+                        map blockers = tables.rayBetween[kingSq * 64 + from] & occ2;
+                        map blockZero = (((blockers | (map)(-(int64_t)blockers)) >> 63) ^ 1ULL);
+                        map noBlockers = (map)(-(int64_t)blockZero);
+                        map atkSqBit = (atkSquares >> (from - 2)) & 1ULL;
+                        map atkMask = (map)(-(int64_t)atkSqBit);
+                        map cond = epCand & rowEqMask & noBlockers & atkMask;
+                        map epInvMask = ~(map)(-(int64_t)cond);
+                        pinMask &= epInvMask;
+                    }
+                }
+                if (pawnAtk & pinMask) return true;
+            }
+
+            tmpPawn = capsR;
+            while (tmpPawn) {
+                int to = popLSB(tmpPawn);
+                int from = to + signPawn * 8 - 1;
+                map pawnAtk = 1ULL << to;
+                map pinMask = getPinRay(pinnerOf, kingSq, from);
+
+                if constexpr (bs.hasEnPassant) {
+                    map epCand = pawnAtk & b.enPassantBB;
+                    if (epCand) {
+                        int rowDiff = (from ^ kingSq) >> 3;
+                        map rowEq = (((map)rowDiff | (map)(-(int64_t)rowDiff)) >> 63) ^ 1ULL;
+                        map rowEqMask = (map)(-(int64_t)rowEq);
+                        map pawnSq = 1ULL << from;
+                        map capSq = 1ULL << (from + 1);
+                        map occ2 = b.occ & ~(pawnSq | capSq);
+                        map blockers = tables.rayBetween[kingSq * 64 + from] & occ2;
+                        map blockZero = (((blockers | (map)(-(int64_t)blockers)) >> 63) ^ 1ULL);
+                        map noBlockers = (map)(-(int64_t)blockZero);
+                        map atkSqBit = (atkSquares >> (from + 2)) & 1ULL;
+                        map atkMask = (map)(-(int64_t)atkSqBit);
+                        map cond = epCand & rowEqMask & noBlockers & atkMask;
+                        map epInvMask = ~(map)(-(int64_t)cond);
+                        pinMask &= epInvMask;
+                    }
+                }
+                if (pawnAtk & pinMask) return true;
+            }
+
+            // 5. Pièces glissantes (Fous & Dames)
+            tmp = b.ourBishop | b.ourQueen;
+            while (tmp) {
+                int sq = popLSB(tmp);
+                int idx = (int)(((b.occ & tables.bishopMasks[sq]) * tables.bishopMagicNumbers[sq]) >> tables.bishopShifts[sq]);
+                map atk = tables.bishopAttacks[tables.bishopOffsets[sq] + idx] & (~b.ourOcc) & checkMask;
+                if (atk & getPinRay(pinnerOf, kingSq, sq)) return true;
+            }
+
+            // Pièces glissantes (Tours & Dames)
+            tmp = b.ourRook | b.ourQueen;
+            while (tmp) {
+                int sq = popLSB(tmp);
+                int idx = (int)(((b.occ & tables.rookMasks[sq]) * tables.rookMagicNumbers[sq]) >> tables.rookShifts[sq]);
+                map atk = tables.rookAttacks[tables.rookOffsets[sq] + idx] & (~b.ourOcc) & checkMask;
+                if (atk & getPinRay(pinnerOf, kingSq, sq)) return true;
+            }
+
+            // 6. Roque (Vérifié en dernier car coûteux et rarement l'unique coup possible)
+            if (checkCount == 0 && (bs.wCastlingK || bs.wCastlingQ || bs.bCastlingK || bs.bCastlingQ)) {
+                const int startSq = bs.isWhite ? 4 : 60;
+                if (kingSq == startSq) {
+                    if constexpr (bs.isWhite) {
+                        if constexpr (bs.wCastlingK) {
+                            if (!(((b.occ | atkSquares) & 0x60) || (~b.ourRook & 0x80))) return true;
+                        }
+                        if constexpr (bs.wCastlingQ) {
+                            if (!(((b.occ & 0xE) | (atkSquares & 0xC)) || (~b.ourRook & 0x1))) return true;
+                        }
+                    }
+                    else {
+                        if constexpr (bs.bCastlingK) {
+                            if (!(((b.occ | atkSquares) & 0x6000000000000000ULL) || (~b.ourRook & 0x8000000000000000ULL))) return true;
+                        }
+                        if constexpr (bs.bCastlingQ) {
+                            if (!(((b.occ & 0x0E00000000000000ULL) | (atkSquares & 0x0C00000000000000ULL)) || (~b.ourRook & 0x0100000000000000ULL))) return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
         }
 
         static void generate(const StateBB& state, ActionList& out) noexcept
@@ -286,20 +461,19 @@ namespace Chess
             Board b;
             b.setBoard(state);
 
-            // KingBB
             map tmp = b.ourKing;
             int kingSq = popLSB(tmp);
 
             map checkMask = 0;
             int checkCount = 0;
 
-            int pinnerOf[64];
+            int8_t pinnerOf[64];
             std::memset(pinnerOf, -1, sizeof(pinnerOf));
             computeCheckAndPins(b, pinnerOf, checkMask, checkCount, kingSq);
 
-            map x = checkMask | (map)(-(int64_t)checkMask);
-            map zeroFlag = (x >> 63) ^ 1ULL;
-            checkMask |= (map)(-(int64_t)zeroFlag);
+            // OPTIMISATION : Prédiction de branche (1 seul CPU jump contre 4 bit-shifts lourds)
+            if (!checkMask) checkMask = ~0ULL;
+
             map atkSquares = computeAttacks(b);
 
             if (LIKELY(checkCount < 2))
@@ -307,7 +481,6 @@ namespace Chess
                 map singlePush, doublePush, capsL, capsR;
                 int signPawn;
 
-                // If White
                 if constexpr (bs.isWhite)
                 {
                     signPawn = -1;
@@ -337,7 +510,6 @@ namespace Chess
                         & checkMask;
                 }
 
-                // Pawn Pseudo-legal moves
                 while (singlePush)
                 {
                     int to = popLSB(singlePush);
@@ -376,44 +548,33 @@ namespace Chess
 
                     if constexpr (bs.hasEnPassant)
                     {
-                        // a) EP candidate -> flag dans pawnAtk & enPassantBB
                         map epCand = pawnAtk & b.enPassantBB;
+                        // OPTIMISATION : Ne calcule les masques EP que si le coup EST une prise en passant !
+                        if (epCand) {
+                            int rowDiff = (from ^ kingSq) >> 3;
+                            map rowEq = (((map)rowDiff | (map)(-(int64_t)rowDiff)) >> 63) ^ 1ULL;
+                            map rowEqMask = (map)(-(int64_t)rowEq);
 
-                        // b) rowEqMask = all1 si from/8 == kingSq/8, sinon 0
-                        int rowDiff = (from ^ kingSq) >> 3;
-                        map rowEq = (((map)rowDiff | (map)(-(int64_t)rowDiff)) >> 63) ^ 1ULL;
-                        map rowEqMask = (map)(-(int64_t)rowEq);
+                            map pawnSq = 1ULL << from;
+                            map capSq = 1ULL << (from - 1);
+                            map occ2 = b.occ & ~(pawnSq | capSq);
 
-                        // c) simulate occ2 = occ sans le pion bougeant et sans le pion capturé
-                        map pawnSq = 1ULL << from;              // Case du pion
-                        map capSq = 1ULL << (from - 1);         // Case du pion capturé
-                        map occ2 = b.occ & ~(pawnSq | capSq);
+                            map blockers = tables.rayBetween[kingSq * 64 + from] & occ2;
+                            map blockZero = (((blockers | (map)(-(int64_t)blockers)) >> 63) ^ 1ULL);
+                            map noBlockers = (map)(-(int64_t)blockZero);
 
-                        // d) blockers = cases entre roi et from après capture
-                        map betweenKF = tables.rayBetween[kingSq * 64 + from];
-                        map blockers = betweenKF & occ2;
+                            map atkSqBit = (atkSquares >> (from - 2)) & 1ULL;
+                            map atkMask = (map)(-(int64_t)atkSqBit);
 
-                        // e) noBlockersMask = all1 si blockers == 0, sinon 0
-                        map blockZero = (((blockers | (map)(-(int64_t)blockers)) >> 63) ^ 1ULL);
-                        map noBlockers = (map)(-(int64_t)blockZero);
+                            map cond = epCand & rowEqMask & noBlockers & atkMask;
+                            map epInvMask = ~(map)(-(int64_t)cond);
 
-                        // f) attacker behind from: atkSquares & (1<<(from-2))
-                        map atkSqBit = (atkSquares >> (from - 2)) & 1ULL;
-                        map atkMask = (map)(-(int64_t)atkSqBit);
-
-                        // g) cond = epCand & rowEqMask & noBlockers & atkMask
-                        map cond = epCand & rowEqMask & noBlockers & atkMask;
-
-                        // h) epInvalidMask = ~(-cond) → 0 if cond!=0, all1 if cond==0
-                        map epInvMask = ~(map)(-(int64_t)cond);
-
-                        // i) mise à jour du pinMask
-                        pinMask &= epInvMask;
+                            pinMask &= epInvMask;
+                        }
                     }
 
                     map finalMask = pawnAtk & pinMask;
 
-                    // Promotion
                     map isPromoting;
                     if constexpr (bs.isWhite)
                         isPromoting = (finalMask & RANK_8) >> to;
@@ -432,39 +593,29 @@ namespace Chess
 
                     if constexpr (bs.hasEnPassant)
                     {
-                        // a) EP candidate -> flag dans pawnAtk & enPassantBB
                         map epCand = pawnAtk & b.enPassantBB;
+                        // OPTIMISATION : Ne calcule les masques EP que si le coup EST une prise en passant !
+                        if (epCand) {
+                            int rowDiff = (from ^ kingSq) >> 3;
+                            map rowEq = (((map)rowDiff | (map)(-(int64_t)rowDiff)) >> 63) ^ 1ULL;
+                            map rowEqMask = (map)(-(int64_t)rowEq);
 
-                        // b) rowEqMask = all1 si from/8 == kingSq/8, sinon 0
-                        int rowDiff = (from ^ kingSq) >> 3;
-                        map rowEq = (((map)rowDiff | (map)(-(int64_t)rowDiff)) >> 63) ^ 1ULL;
-                        map rowEqMask = (map)(-(int64_t)rowEq);
+                            map pawnSq = 1ULL << from;
+                            map capSq = 1ULL << (from + 1);
+                            map occ2 = b.occ & ~(pawnSq | capSq);
 
-                        // c) simulate occ2 = occ sans le pion bougeant et sans le pion capturé
-                        map pawnSq = 1ULL << from;              // Case du pion
-                        map capSq = 1ULL << (from + 1);         // Case du pion capturé
-                        map occ2 = b.occ & ~(pawnSq | capSq);
+                            map blockers = tables.rayBetween[kingSq * 64 + from] & occ2;
+                            map blockZero = (((blockers | (map)(-(int64_t)blockers)) >> 63) ^ 1ULL);
+                            map noBlockers = (map)(-(int64_t)blockZero);
 
-                        // d) blockers = cases entre roi et from après capture
-                        map betweenKF = tables.rayBetween[kingSq * 64 + from];
-                        map blockers = betweenKF & occ2;
+                            map atkSqBit = (atkSquares >> (from + 2)) & 1ULL;
+                            map atkMask = (map)(-(int64_t)atkSqBit);
 
-                        // e) noBlockersMask = all1 si blockers == 0, sinon 0
-                        map blockZero = (((blockers | (map)(-(int64_t)blockers)) >> 63) ^ 1ULL);
-                        map noBlockers = (map)(-(int64_t)blockZero);
+                            map cond = epCand & rowEqMask & noBlockers & atkMask;
+                            map epInvMask = ~(map)(-(int64_t)cond);
 
-                        // f) attacker behind from: atkSquares & (1<<(from+2))
-                        map atkSqBit = (atkSquares >> (from + 2)) & 1ULL;
-                        map atkMask = (map)(-(int64_t)atkSqBit);
-
-                        // g) cond = epCand & rowEqMask & noBlockers & atkMask
-                        map cond = epCand & rowEqMask & noBlockers & atkMask;
-
-                        // h) epInvalidMask = ~(-cond) → 0 if cond!=0, all1 if cond==0
-                        map epInvMask = ~(map)(-(int64_t)cond);
-
-                        // i) mise à jour du pinMask
-                        pinMask &= epInvMask;
+                            pinMask &= epInvMask;
+                        }
                     }
 
                     map finalMask = pawnAtk & pinMask;
@@ -508,7 +659,7 @@ namespace Chess
                     map finalMask = bishopAtk & pinRay;
 
                     bool isQueen = (b.ourQueen & (1ULL << bishopSq)) != 0;
-                    
+
                     addLegalMoves(out, isQueen ? QUEEN : BISHOP, bishopSq, finalMask, 0);
                 }
 

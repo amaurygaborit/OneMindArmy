@@ -12,6 +12,7 @@ engine:
   cPUCT: 1.5
   fpuValue: 0.25            # Assume unknown moves are neutral instead of bad
   virtualLoss: 2.0         # Lower penalty needed for single game
+  temperatureDropPly: 0
 
   gumbelK: 8
   gumbelCVisit: 50.0

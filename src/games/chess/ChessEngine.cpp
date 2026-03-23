@@ -320,78 +320,148 @@ namespace Chess
 		}
 		return (checkCount > 0);
 	}
+	bool ChessEngine::hasAnyLegalMove(const State& state) const
+	{
+		StateBB stateBB{};
+		stateToBB(state, stateBB);
+
+		bool isWhite = (state.getMeta(SLOT_TURN).ownerId() == WHITE);
+		bool wk = state.getMeta(SLOT_CASTLING_WK).exists();
+		bool wq = state.getMeta(SLOT_CASTLING_WQ).exists();
+		bool bk = state.getMeta(SLOT_CASTLING_BK).exists();
+		bool bq = state.getMeta(SLOT_CASTLING_BQ).exists();
+
+		auto epVal = static_cast<size_t>(state.getMeta(SLOT_EN_PASSANT).pos());
+		bool hasEp = epVal != Defs::kNoPos;
+		stateBB.enPassant = static_cast<uint8_t>(epVal);
+
+		uint8_t status = (isWhite ? 1 : 0) | (wk ? 2 : 0) | (wq ? 4 : 0) | (bk ? 8 : 0) | (bq ? 16 : 0) | (hasEp ? 32 : 0);
+
+		// Tu peux faire un switch de 0 à 63 comme dans getValidActions
+		switch (status)
+		{
+		case  0: return MoveGenerator< 0>::hasAnyLegalMove(stateBB);
+		case  1: return MoveGenerator< 1>::hasAnyLegalMove(stateBB);
+		case  2: return MoveGenerator< 2>::hasAnyLegalMove(stateBB);
+		case  3: return MoveGenerator< 3>::hasAnyLegalMove(stateBB);
+		case  4: return MoveGenerator< 4>::hasAnyLegalMove(stateBB);
+		case  5: return MoveGenerator< 5>::hasAnyLegalMove(stateBB);
+		case  6: return MoveGenerator< 6>::hasAnyLegalMove(stateBB);
+		case  7: return MoveGenerator< 7>::hasAnyLegalMove(stateBB);
+		case  8: return MoveGenerator< 8>::hasAnyLegalMove(stateBB);
+		case  9: return MoveGenerator< 9>::hasAnyLegalMove(stateBB);
+		case 10: return MoveGenerator<10>::hasAnyLegalMove(stateBB);
+		case 11: return MoveGenerator<11>::hasAnyLegalMove(stateBB);
+		case 12: return MoveGenerator<12>::hasAnyLegalMove(stateBB);
+		case 13: return MoveGenerator<13>::hasAnyLegalMove(stateBB);
+		case 14: return MoveGenerator<14>::hasAnyLegalMove(stateBB);
+		case 15: return MoveGenerator<15>::hasAnyLegalMove(stateBB);
+		case 16: return MoveGenerator<16>::hasAnyLegalMove(stateBB);
+		case 17: return MoveGenerator<17>::hasAnyLegalMove(stateBB);
+		case 18: return MoveGenerator<18>::hasAnyLegalMove(stateBB);
+		case 19: return MoveGenerator<19>::hasAnyLegalMove(stateBB);
+		case 20: return MoveGenerator<20>::hasAnyLegalMove(stateBB);
+		case 21: return MoveGenerator<21>::hasAnyLegalMove(stateBB);
+		case 22: return MoveGenerator<22>::hasAnyLegalMove(stateBB);
+		case 23: return MoveGenerator<23>::hasAnyLegalMove(stateBB);
+		case 24: return MoveGenerator<24>::hasAnyLegalMove(stateBB);
+		case 25: return MoveGenerator<25>::hasAnyLegalMove(stateBB);
+		case 26: return MoveGenerator<26>::hasAnyLegalMove(stateBB);
+		case 27: return MoveGenerator<27>::hasAnyLegalMove(stateBB);
+		case 28: return MoveGenerator<28>::hasAnyLegalMove(stateBB);
+		case 29: return MoveGenerator<29>::hasAnyLegalMove(stateBB);
+		case 30: return MoveGenerator<30>::hasAnyLegalMove(stateBB);
+		case 31: return MoveGenerator<31>::hasAnyLegalMove(stateBB);
+		case 32: return MoveGenerator<32>::hasAnyLegalMove(stateBB);
+		case 33: return MoveGenerator<33>::hasAnyLegalMove(stateBB);
+		case 34: return MoveGenerator<34>::hasAnyLegalMove(stateBB);
+		case 35: return MoveGenerator<35>::hasAnyLegalMove(stateBB);
+		case 36: return MoveGenerator<36>::hasAnyLegalMove(stateBB);
+		case 37: return MoveGenerator<37>::hasAnyLegalMove(stateBB);
+		case 38: return MoveGenerator<38>::hasAnyLegalMove(stateBB);
+		case 39: return MoveGenerator<39>::hasAnyLegalMove(stateBB);
+		case 40: return MoveGenerator<40>::hasAnyLegalMove(stateBB);
+		case 41: return MoveGenerator<41>::hasAnyLegalMove(stateBB);
+		case 42: return MoveGenerator<42>::hasAnyLegalMove(stateBB);
+		case 43: return MoveGenerator<43>::hasAnyLegalMove(stateBB);
+		case 44: return MoveGenerator<44>::hasAnyLegalMove(stateBB);
+		case 45: return MoveGenerator<45>::hasAnyLegalMove(stateBB);
+		case 46: return MoveGenerator<46>::hasAnyLegalMove(stateBB);
+		case 47: return MoveGenerator<47>::hasAnyLegalMove(stateBB);
+		case 48: return MoveGenerator<48>::hasAnyLegalMove(stateBB);
+		case 49: return MoveGenerator<49>::hasAnyLegalMove(stateBB);
+		case 50: return MoveGenerator<50>::hasAnyLegalMove(stateBB);
+		case 51: return MoveGenerator<51>::hasAnyLegalMove(stateBB);
+		case 52: return MoveGenerator<52>::hasAnyLegalMove(stateBB);
+		case 53: return MoveGenerator<53>::hasAnyLegalMove(stateBB);
+		case 54: return MoveGenerator<54>::hasAnyLegalMove(stateBB);
+		case 55: return MoveGenerator<55>::hasAnyLegalMove(stateBB);
+		case 56: return MoveGenerator<56>::hasAnyLegalMove(stateBB);
+		case 57: return MoveGenerator<57>::hasAnyLegalMove(stateBB);
+		case 58: return MoveGenerator<58>::hasAnyLegalMove(stateBB);
+		case 59: return MoveGenerator<59>::hasAnyLegalMove(stateBB);
+		case 60: return MoveGenerator<60>::hasAnyLegalMove(stateBB);
+		case 61: return MoveGenerator<61>::hasAnyLegalMove(stateBB);
+		case 62: return MoveGenerator<62>::hasAnyLegalMove(stateBB);
+		case 63: return MoveGenerator<63>::hasAnyLegalMove(stateBB);
+		default: assert(false); return false;
+		}
+	}
+
 	std::optional<GameResult> ChessEngine::getGameResult(
 		const State& state,
 		std::span<const uint64_t> hashHistory) const
 	{
-		// Définition des templates WDL absolus (Game Agnostic compatible)
-		// Format: [White_Win, White_Draw, White_Loss, Black_Win, Black_Draw, Black_Loss]
 		constexpr std::array<float, 6> WDL_DRAW = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f };
 		constexpr std::array<float, 6> WDL_WHITE = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
 		constexpr std::array<float, 6> WDL_BLACK = { 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f };
 
-		// ==================================================================
-		// 1. HARD CAP — Plafond absolu de longueur de partie
-		// ==================================================================
-		if (static_cast<int>(hashHistory.size()) >= 200)
-		{
+		// 1. HARD CAP
+		// Note : 200 plies (100 coups), c'est bien, mais AlphaZero utilise souvent 512. 
+		// Garde 200 si tu veux forcer des parties courtes à l'entraînement.
+		if (hashHistory.size() >= 200) {
 			return GameResult{ WDL_DRAW, static_cast<uint32_t>(ChessEndReason::MaxPlyReached) };
 		}
 
-		// ==================================================================
 		// 2. RÈGLE DES 50 COUPS
-		// ==================================================================
-		if (isFiftyMoveRule(state))
-		{
+		if (isFiftyMoveRule(state)) {
 			return GameResult{ WDL_DRAW, static_cast<uint32_t>(ChessEndReason::FiftyMoveRule) };
 		}
 
-		// ==================================================================
 		// 3. MATÉRIEL INSUFFISANT
-		// ==================================================================
-		if (isInsufficientMaterial(state))
-		{
+		if (isInsufficientMaterial(state)) {
 			return GameResult{ WDL_DRAW, static_cast<uint32_t>(ChessEndReason::InsufficientMaterial) };
 		}
 
-		// ==================================================================
 		// 4. TRIPLE RÉPÉTITION (FIDE 9.2)
-		// ==================================================================
 		{
 			const uint64_t currentHash = state.hash();
-			int            repetitions = 0;
+			int repetitions = 0;
 
-			for (const uint64_t h : hashHistory)
-			{
-				if (h == currentHash)
-					++repetitions;
-			}
-
-			if (repetitions >= 2)
-			{
-				return GameResult{ WDL_DRAW, static_cast<uint32_t>(ChessEndReason::Repetition) };
+			// Optimisation : compter à l'envers permet souvent de trouver les répétitions plus vite
+			for (auto it = hashHistory.rbegin(); it != hashHistory.rend(); ++it) {
+				if (*it == currentHash) {
+					if (++repetitions >= 3) { // CORRECTION : >= 3 pour une vraie triple répétition
+						return GameResult{ WDL_DRAW, static_cast<uint32_t>(ChessEndReason::Repetition) };
+					}
+				}
 			}
 		}
 
-		// ==================================================================
-		// 5. MAT / PAT
-		// ==================================================================
-		const ActionList actionList = getValidActions(state, hashHistory);
-
-		if (actionList.empty())
+		// 5. MAT / PAT (Optimisé sans double génération)
+		if (!hasAnyLegalMove(state)) // À implémenter dans ton moteur !
 		{
-			if (!ourKingInCheck(state))
-			{
-				// Aucun coup légal, roi non en échec → Pat
+			if (!ourKingInCheck(state)) {
+				// Pat
 				return GameResult{ WDL_DRAW, static_cast<uint32_t>(ChessEndReason::Stalemate) };
 			}
 
-			// Aucun coup légal, roi en échec → Mat
+			// Mat
 			const bool whiteToMove = (state.getMeta(SLOT_TURN).ownerId() == WHITE);
 			if (whiteToMove)
-				return GameResult{ WDL_BLACK, static_cast<uint32_t>(ChessEndReason::Checkmate) }; // Noirs gagnent
+				return GameResult{ WDL_BLACK, static_cast<uint32_t>(ChessEndReason::Checkmate) };
 			else
-				return GameResult{ WDL_WHITE, static_cast<uint32_t>(ChessEndReason::Checkmate) }; // Blancs gagnent
+				return GameResult{ WDL_WHITE, static_cast<uint32_t>(ChessEndReason::Checkmate) };
 		}
 
 		// La partie continue
