@@ -161,9 +161,11 @@ namespace Core
 
             auto& net = m_neuralNets[gpuIdx];
 
-            AlignedVec<EvalTask>                              batchTasks(reserve_only, configBatchSize);
-            AlignedVec<std::array<float, Defs::kNNInputSize>> batchInputs(reserve_only, configBatchSize);
-            AlignedVec<ModelResults>                          batchOutputs(reserve_only, configBatchSize);
+            AlignedVec<EvalTask> batchTasks(reserve_only, configBatchSize);
+            AlignedVec<ModelResults> batchOutputs(reserve_only, configBatchSize);
+
+            // NOUVEAU : Un simple tableau de pointeurs (très léger, aucune copie de tenseur)
+            AlignedVec<const std::array<float, Defs::kNNInputSize>*> batchPtrs(reserve_only, configBatchSize);
 
             while (m_running)
             {
@@ -171,14 +173,14 @@ namespace Core
                 const size_t count = m_qEval.pop_batch(batchTasks, configBatchSize, std::chrono::microseconds(1000));
                 if (count == 0) continue;
 
-                batchInputs.clear();
+                batchPtrs.clear();
                 batchOutputs.resize(count);
 
-                // Copie directe de l'entrée préparée vers le tampon contigu pour le GPU
+                // On ne stocke que l'adresse mémoire de l'input du context MCTS
                 for (const auto& task : batchTasks)
-                    batchInputs.push_back(task.ctx->nnInput);
+                    batchPtrs.push_back(&task.ctx->nnInput);
 
-                net->forwardBatch(batchInputs, batchOutputs);
+                net->forwardBatch(batchPtrs, batchOutputs);
 
                 for (size_t i = 0; i < count; ++i)
                 {

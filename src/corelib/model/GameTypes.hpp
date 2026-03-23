@@ -142,18 +142,21 @@ namespace Core
 
         constexpr void set(size_t pos) noexcept
         {
+            assert(pos < NumBits && "[Bitset] set() out of bounds!");
             if constexpr (Props::IsPrimitive) bits |= (static_cast<Storage>(1) << pos);
             else                              bits[pos / 64] |= (1ULL << (pos % 64));
         }
 
         constexpr void unset(size_t pos) noexcept
         {
+            assert(pos < NumBits && "[Bitset] unset() out of bounds!");
             if constexpr (Props::IsPrimitive) bits &= ~(static_cast<Storage>(1) << pos);
             else                              bits[pos / 64] &= ~(1ULL << (pos % 64));
         }
 
         [[nodiscard]] constexpr bool test(size_t pos) const noexcept
         {
+            assert(pos < NumBits && "[Bitset] test() out of bounds!");
             if constexpr (Props::IsPrimitive) return (bits & (static_cast<Storage>(1) << pos)) != 0;
             else                              return (bits[pos / 64] & (1ULL << (pos % 64))) != 0;
         }
@@ -636,7 +639,10 @@ namespace Core
 
     public:
         void clear() noexcept { m_size = 0; }
-        void push_back(const T& val) noexcept { m_data[m_size++] = val; }
+        void push_back(const T& val) noexcept {
+            assert(m_size < Capacity && "StaticVec capacity exceeded!");
+            m_data[m_size++] = val;
+        }
 
         [[nodiscard]] size_t size() const noexcept { return m_size; }
         [[nodiscard]] bool empty() const noexcept { return m_size == 0; }

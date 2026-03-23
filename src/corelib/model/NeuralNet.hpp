@@ -121,24 +121,30 @@ namespace Core
         {
             CUDA_CHECK(cudaSetDevice(m_deviceId));
             CUDA_CHECK(cudaStreamCreate(&m_stream));
-            loadEngine(enginePath);
+            try {
+                loadEngine(enginePath);
 
-            const uint32_t B = inferenceBatchSize;
+                const uint32_t B = inferenceBatchSize;
 
-            // GPU buffers
-            CUDA_CHECK(cudaMalloc(&d_input, B * Defs::kNNInputSize * sizeof(float)));
-            CUDA_CHECK(cudaMalloc(&d_values, B * kValueOutSize * sizeof(float)));
-            CUDA_CHECK(cudaMalloc(&d_policy, B * Defs::kActionSpace * sizeof(float)));
+                // GPU buffers
+                CUDA_CHECK(cudaMalloc(&d_input, B * Defs::kNNInputSize * sizeof(float)));
+                CUDA_CHECK(cudaMalloc(&d_values, B * kValueOutSize * sizeof(float)));
+                CUDA_CHECK(cudaMalloc(&d_policy, B * Defs::kActionSpace * sizeof(float)));
 
-            // Pinned CPU buffers (direct DMA, no paging)
-            CUDA_CHECK(cudaMallocHost(&h_input, B * Defs::kNNInputSize * sizeof(float)));
-            CUDA_CHECK(cudaMallocHost(&h_values, B * kValueOutSize * sizeof(float)));
-            CUDA_CHECK(cudaMallocHost(&h_policy, B * Defs::kActionSpace * sizeof(float)));
+                // Pinned CPU buffers (direct DMA, no paging)
+                CUDA_CHECK(cudaMallocHost(&h_input, B * Defs::kNNInputSize * sizeof(float)));
+                CUDA_CHECK(cudaMallocHost(&h_values, B * kValueOutSize * sizeof(float)));
+                CUDA_CHECK(cudaMallocHost(&h_policy, B * Defs::kActionSpace * sizeof(float)));
 
-            // Tensor name bindings — must match the ONNX export in train.py
-            m_context->setTensorAddress("input_state", d_input);
-            m_context->setTensorAddress("value_output", d_values);
-            m_context->setTensorAddress("policy_output", d_policy);
+                // Tensor name bindings — must match the ONNX export in train.py
+                m_context->setTensorAddress("input_state", d_input);
+                m_context->setTensorAddress("value_output", d_values);
+                m_context->setTensorAddress("policy_output", d_policy);
+            }
+            catch (...) {
+                if (m_stream) cudaStreamDestroy(m_stream);
+                throw;
+            }
         }
 
         ~NeuralNet()
@@ -162,10 +168,10 @@ namespace Core
         // BATCH INFERENCE
         // ----------------------------------------------------------------
         void forwardBatch(
-            const AlignedVec<std::array<float, Defs::kNNInputSize>>& batchInputs,
+            const AlignedVec<const std::array<float, Defs::kNNInputSize>*>& batchPtrs,
             AlignedVec<ModelResults>& results)
         {
-            const int32_t batchSize = static_cast<int32_t>(batchInputs.size());
+            const int32_t batchSize = static_cast<int32_t>(batchPtrs.size());
             if (batchSize == 0) return;
 
             if (results.size() < static_cast<size_t>(batchSize))
@@ -173,14 +179,20 @@ namespace Core
 
             CUDA_CHECK(cudaSetDevice(m_deviceId));
 
-            // Dynamic shape
             m_context->setInputShape(
                 "input_state",
                 nvinfer1::Dims2{ batchSize, static_cast<int32_t>(Defs::kNNInputSize) });
 
-            // H2D
+            // === OPTIMISATION : Copie directe depuis le MCTS vers la mémoire Pinned ===
+            for (int32_t b = 0; b < batchSize; ++b) {
+                std::memcpy(
+                    h_input + b * Defs::kNNInputSize,
+                    batchPtrs[b]->data(),
+                    Defs::kNNInputSize * sizeof(float)
+                );
+            }
+
             const size_t inputBytes = static_cast<size_t>(batchSize) * Defs::kNNInputSize * sizeof(float);
-            std::memcpy(h_input, batchInputs.data(), inputBytes);
             CUDA_CHECK(cudaMemcpyAsync(d_input, h_input, inputBytes, cudaMemcpyHostToDevice, m_stream));
 
             // Async inference

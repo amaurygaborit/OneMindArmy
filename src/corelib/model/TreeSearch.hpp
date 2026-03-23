@@ -36,7 +36,7 @@ namespace Core
         AlignedVec<Action>   pathActions;
         AlignedVec<uint64_t> pathHashes;
 
-        std::vector<uint64_t> fullHashBuffer;
+        AlignedVec<uint64_t> fullHashBuffer;
 
         std::array<float, Defs::kNNInputSize>    nnInput{};
         std::array<float, Defs::kNumPlayers * 3> nnWDL{};
@@ -49,12 +49,11 @@ namespace Core
         bool collision = false;
 
         explicit NodeEvent(uint32_t maxDepth)
-            : path(reserve_only, maxDepth)
+            : path(reserve_only, maxDepth + 1)
             , pathActions(reserve_only, maxDepth)
             , pathHashes(reserve_only, maxDepth)
+            , fullHashBuffer(reserve_only, 2048)
         {
-            // OPTIMISATION : Pré-allocation massive et définitive pour éviter les re-allocations au runtime.
-            fullHashBuffer.reserve(Defs::kMaxHistory * 2 + maxDepth + 128);
         }
 
         void reset()
@@ -129,28 +128,31 @@ namespace Core
             const size_t totalNeeded = Defs::kMaxHistory;
             const size_t realCount = m_realHistory.size();
             const size_t pathCount = ctx.pathActions.size();
-            const size_t totalAvailable = realCount + pathCount;
-            size_t startIdx = (totalAvailable > totalNeeded) ? (totalAvailable - totalNeeded) : 0;
-            size_t processed = 0;
 
             StaticVec<Action, Defs::kMaxHistory> povHistory;
-            for (size_t i = 0; i < realCount; ++i) {
-                if (processed >= startIdx || (realCount - i + pathCount) <= totalNeeded) {
-                    Action a = m_realHistory[i];
-                    m_engine->changeActionPov(viewer, a);
-                    povHistory.push_back(a);
-                }
-                ++processed;
+
+            // Calculate exactly how many actions to pull from each buffer
+            const size_t pathTake = std::min(pathCount, totalNeeded);
+            const size_t realTake = std::min(realCount, totalNeeded - pathTake);
+
+            // 1. Fill from the actual game history first
+            for (size_t i = realCount - realTake; i < realCount; ++i) {
+                Action a = m_realHistory[i];
+                m_engine->changeActionPov(viewer, a);
+                povHistory.push_back(a);
             }
-            for (size_t i = 0; i < pathCount; ++i) {
+
+            // 2. Fill the rest from the current MCTS simulation path
+            for (size_t i = pathCount - pathTake; i < pathCount; ++i) {
                 Action a = ctx.pathActions[i];
                 m_engine->changeActionPov(viewer, a);
                 povHistory.push_back(a);
             }
+
             ctx.nnInput = StateEncoder<GT>::encode(povState, povHistory);
         }
 
-        void buildFullHashHistory(const AlignedVec<uint64_t>& pathHashes, std::vector<uint64_t>& out) const {
+        void buildFullHashHistory(const AlignedVec<uint64_t>& pathHashes, AlignedVec<uint64_t>& out) const {
             out.clear();
             out.insert(out.end(), m_realHashHistory.begin(), m_realHashHistory.end());
             out.insert(out.end(), pathHashes.begin(), pathHashes.end());
@@ -324,6 +326,9 @@ namespace Core
                                 uint32_t aId = m_engine->actionToIdx(ctx.validActions[i]);
                                 m_nodePrior[startIdx + i] = (aId < Defs::kActionSpace) ? ctx.policy[aId] : 0.0f;
                                 m_nodeFlags[startIdx + i].val.store(FLAG_NONE, std::memory_order_relaxed);
+                                m_nodeEdges[startIdx + i].visitCount.store(0, std::memory_order_relaxed);
+                                m_nodeEdges[startIdx + i].totalValue.store(0.0f, std::memory_order_relaxed);
+                                m_nodeNumChildren[startIdx + i].val.store(0, std::memory_order_relaxed);                            
                             }
                             m_nodeFirstChild[leaf] = startIdx;
                             m_nodeNumChildren[leaf].val.store(static_cast<uint16_t>(nChildren), std::memory_order_relaxed);
@@ -370,7 +375,9 @@ namespace Core
             m_realHashHistory.push_back(newState.hash());
 
             bool reused = false;
-            if (m_config.reuseTree && m_rootIdx != UINT32_MAX) {
+            if (m_config.reuseTree && m_rootIdx != UINT32_MAX &&
+                m_nodeCount.load(std::memory_order_relaxed) < (m_config.maxNodes * 0.8f))
+            {
                 uint8_t flags = m_nodeFlags[m_rootIdx].val.load(std::memory_order_acquire);
                 if (flags & FLAG_EXPANDED) {
                     uint32_t start = m_nodeFirstChild[m_rootIdx];
