@@ -83,6 +83,28 @@ namespace Core
         };
 
         // ─────────────────────────────────────────────────────────────────────
+        // DashSnap — point-in-time snapshot of the MCTS metrics.
+        //
+        // WHY A SEPARATE STRUCT?
+        // The dashboard is rendered AFTER advanceRoot() has been called for
+        // every parallel game.  advanceRoot() unconditionally calls
+        // resetCounters() (tree-reuse path) or startSearch() (full-reset
+        // path), both of which zero m_simulationsFinished and m_nodeCount.
+        // Reading getRootValue() / getSimulationCount() / getMemoryUsage()
+        // after that point always returns 0.
+        //
+        // The fix: call captureSnap() RIGHT AFTER executeMultipleTrees()
+        // returns — before any advanceRoot() or resetGame() — and stash
+        // the values here.
+        // ─────────────────────────────────────────────────────────────────────
+        struct DashSnap
+        {
+            float    rootQ = 0.0f;
+            uint32_t sims = 0;
+            int      memPct = 0;
+        };
+
+        // ─────────────────────────────────────────────────────────────────────
         // DashboardState — live metrics displayed in the terminal.
         // Kept as a plain struct (no atomics) because it is only accessed
         // from the single-threaded main loop.
@@ -254,7 +276,7 @@ namespace Core
          * @param sample  Any running game (used to read one tree's metrics)
          */
         void printDashboard(DashboardState& d, uint32_t target,
-            double elapsed, const GameContext& sample) const
+            double elapsed, const DashSnap& snap) const
         {
             static const std::string HL = "═";
             static const std::string CL = "\033[K"; // clear to end of line
@@ -275,10 +297,11 @@ namespace Core
             const double eta = (gps > 1e-9 && d.gamesWritten < target)
                 ? (target - d.gamesWritten) / gps : 0.0;
 
-            auto* tree = sample.trees[this->m_engine->getCurrentPlayer(sample.currentState)];
-            const float    rootQ = tree->getRootValue();
-            const uint32_t sims = tree->getSimulationCount();
-            const int      memPct = static_cast<int>(tree->getMemoryUsage() * 100.0f);
+            // Use the pre-captured snapshot — values are valid because they
+            // were read before advanceRoot() called resetCounters().
+            const float    rootQ = snap.rootQ;
+            const uint32_t sims = snap.sims;
+            const int      memPct = snap.memPct;
 
             // ── Build the frame into a single string (minimises write() calls) ──
             std::ostringstream o;
@@ -362,22 +385,29 @@ namespace Core
             // Line 11 ── ╠══ PIPELINE ══╣
             o << CL << boxRuler("PIPELINE");
 
-            // Line 12 ── Search / evaluation queues
+            // NOTE: The ThreadPool queues are always empty when sampled here
+            // because executeMultipleTrees() is blocking — it only returns once
+            // m_pendingTasks == 0, meaning every event has already been drained
+            // from every queue.  Showing "0 0 0" would be misleading.
+            // We display the static thread-pool configuration instead, which is
+            // the actually useful information for tuning purposes.
+
+            // Line 12 ── Thread counts
             {
                 std::snprintf(buf, sizeof(buf),
-                    "Ready : %4zu  |  Eval : %4zu  |  Backprop : %4zu",
-                    this->m_threadPool->getReadyQueueSize(),
-                    this->m_threadPool->getEvalQueueSize(),
-                    this->m_threadPool->getBackpropQueueSize());
+                    "Threads  Search:%-3u  Infer:%-3u  Backprop:%-3u",
+                    m_backendCfg.numSearchThreads,
+                    m_backendCfg.numInferenceThreads,
+                    m_backendCfg.numBackpropThreads);
                 o << CL << boxRow(buf);
             }
 
-            // Line 13 ── Batch size and free event pool
+            // Line 13 ── Batch size and parallel games
             {
                 std::snprintf(buf, sizeof(buf),
-                    "Batch   : %4u   |  Free contexts : %4zu",
+                    "Batch   : %4u   |  Parallel games : %4u",
                     m_backendCfg.inferenceBatchSize,
-                    this->m_threadPool->getFreeEventCount());
+                    m_backendCfg.numParallelGames);
                 o << CL << boxRow(buf);
             }
 
@@ -511,6 +541,20 @@ namespace Core
                 this->m_threadPool->executeMultipleTrees(
                     activeTrees, this->m_engineCfg.numSimulations);
 
+                // ── Capture tree metrics BEFORE any advanceRoot() call ────
+                // advanceRoot() calls resetCounters() (tree-reuse path) or
+                // startSearch() (full-reset path) — both zero
+                // m_simulationsFinished and m_nodeCount immediately.
+                // activeTrees[0] is the tree that just finished for games[0]
+                // this iteration; its counters are still valid right here.
+                DashSnap snap;
+                if (!activeTrees.empty()) {
+                    auto* t = activeTrees[0];
+                    snap.rootQ = t->getRootValue();
+                    snap.sims = t->getSimulationCount();
+                    snap.memPct = static_cast<int>(t->getMemoryUsage() * 100.0f);
+                }
+
                 // ── Step 3 : advance every game by one ply ────────────────
                 for (auto& g : games)
                 {
@@ -609,7 +653,7 @@ namespace Core
                 // ── Step 4 : refresh the dashboard ───────────────────────
                 const double elapsed = std::chrono::duration<double>(
                     std::chrono::high_resolution_clock::now() - startTime).count();
-                printDashboard(dash, target, elapsed, games[0]);
+                printDashboard(dash, target, elapsed, snap);
             }
 
             // ── Print interrupt notice if the loop was interrupted ────────
