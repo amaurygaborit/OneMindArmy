@@ -12,7 +12,7 @@ engine:
   cPUCT: 1.5
   fpuValue: 0.25
   virtualLoss: 0.0
-  temperatureDropPly: 50
+  temperatureDropTurn: 30
 
   gumbelK: 8
   gumbelCVisit: 50.0
@@ -45,12 +45,12 @@ training:
 
 backend:
   numGPUs: auto
-  inferenceBatchSize: 2048
+  inferenceBatchSize: 1024
   numParallelGames: 8192
 
   precision: fp16
-  numSearchThreads: 28
-  numBackpropThreads: 2
+  numSearchThreads: 26
+  numBackpropThreads: 4
   numInferenceThreads: 1
   queueScale: 3.0
   fastDrain: true

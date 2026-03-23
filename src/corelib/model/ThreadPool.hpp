@@ -120,6 +120,11 @@ namespace Core
             executeMultipleTrees({ tree }, numSims);
         }
 
+        [[nodiscard]] size_t getReadyQueueSize() const noexcept { return m_qReadyTrees.size(); }
+        [[nodiscard]] size_t getEvalQueueSize() const noexcept { return m_qEval.size(); }
+        [[nodiscard]] size_t getBackpropQueueSize() const noexcept { return m_qBackprop.size(); }
+        [[nodiscard]] size_t getFreeEventCount() const noexcept { return m_qFree.size(); }
+
     private:
         void loopGather()
         {

@@ -110,5 +110,9 @@ namespace Core
             m_cv_push.notify_one();
             return true;
         }
+
+        [[nodiscard]] size_t size() const {
+            return m_count;
+        }
     };
 }

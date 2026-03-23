@@ -19,15 +19,21 @@
 #include "../model/ReplayBuffer.hpp"
 #include "../model/StateEncoder.hpp"
 
+// Global atomic for graceful shutdown
 inline std::atomic<bool> g_keepRunning{ true };
 
-inline void sigintHandler(int /*signal*/) {
-    std::cout << "\n\n[System] CTRL+C detected. Graceful shutdown in progress...\n";
+inline void sigintHandler(int) {
+    std::cout << "\n\n[System] SIGINT detected. Finalizing writes and shutting down...\n";
     g_keepRunning.store(false, std::memory_order_release);
 }
 
 namespace Core
 {
+    /**
+     * @brief High-performance Self-Play handler.
+     * Manages asynchronous game generation, MCTS tree orchestration, and training data serialization.
+     * Optimized for multi-core CPUs and high-throughput GPUs.
+     */
     template<ValidGameTraits GT>
     class SelfPlayHandler : public IHandler<GT>
     {
@@ -42,33 +48,28 @@ namespace Core
             std::vector<uint64_t>  hashHistory;
             ReplayBuffer<GT>       replayBuffer;
             uint32_t               turnCount = 0;
-            bool                   isOfficial = false;
+            bool                   isOfficial = false; // Contributes to the iteration quota
         };
 
         BackendConfig  m_backendCfg;
         TrainingConfig m_trainingCfg;
         std::string    m_datasetPath = "";
 
-        void specificSetup(const YAML::Node& config) override
-        {
+        void specificSetup(const YAML::Node& config) override {
             m_backendCfg.load(config, "train");
             m_trainingCfg.load(config, "train");
-
-            if (!config["name"])
-                throw std::runtime_error("Config Error: Missing 'name' field in YAML.");
 
             const std::string gameName = config["name"].as<std::string>();
             const std::string dataFolder = "data/" + gameName;
             std::filesystem::create_directories(dataFolder);
 
             std::ostringstream oss;
-            oss << dataFolder << "/iteration_"
-                << std::setw(4) << std::setfill('0') << m_trainingCfg.currentIteration << ".bin";
+            oss << dataFolder << "/iteration_" << std::setw(4) << std::setfill('0')
+                << m_trainingCfg.currentIteration << ".bin";
             m_datasetPath = oss.str();
         }
 
-        void resetGame(GameContext& g)
-        {
+        void resetGame(GameContext& g) {
             g.replayBuffer.clear();
             g.actionHistory.clear();
             g.hashHistory.clear();
@@ -82,84 +83,52 @@ namespace Core
                 g.trees[p]->startSearch(g.currentState, g.hashHistory);
         }
 
-        std::optional<GameResult> checkResign(const GameContext& g,
-            uint32_t currentPlayer) const
+        /**
+         * @brief Renders a dynamic ANSI dashboard to the terminal.
+         * Provides real-time insights into MCTS health and ThreadPool saturation.
+         */
+        void printDashboard(uint32_t written, uint32_t target, uint32_t played, uint64_t samples,
+            uint64_t moves, double sec, const GameContext& sampleGame) const
         {
-            const float    threshold = this->m_engineCfg.resignThreshold;
-            const uint32_t minPly = this->m_engineCfg.resignMinPly;
+            const double speed = moves / std::max(sec, 1e-6);
+            const double filterRatio = (written > 0) ? static_cast<double>(played) / written : 1.0;
 
-            if (threshold <= -1.0f || threshold >= 0.0f) return std::nullopt;
-            if (g.turnCount < minPly)                    return std::nullopt;
+            // Move cursor up 11 lines to overwrite the previous block
+            static bool initialized = false;
+            if (initialized) std::cout << "\033[11F";
+            initialized = true;
 
-            if (g.trees[currentPlayer]->getRootValue() < threshold)
-                return this->m_engine->buildResignResult(currentPlayer);
+            auto* currentTree = sampleGame.trees[this->m_engine->getCurrentPlayer(sampleGame.currentState)];
 
-            return std::nullopt;
-        }
+            std::cout << "\033[K" << "======================= SELF-PLAY DASHBOARD =======================\n";
+            std::cout << "\033[K" << " [PROGRESS] Games: " << written << " / " << target
+                << " | Samples: " << samples << " | Filter: x" << std::fixed << std::setprecision(1) << filterRatio << "\n";
+            std::cout << "\033[K" << " [METRICS]  Speed: " << std::setprecision(1) << speed << " m/s"
+                << " | Elapsed: " << (int)sec / 3600 << "h " << ((int)sec % 3600) / 60 << "m " << (int)sec % 60 << "s\n";
 
-        void printProgress(uint32_t gamesWritten, uint32_t target,
-            uint32_t gamesPlayed,
-            uint64_t writtenMoves, uint64_t playedMoves,
-            uint64_t totalSamples, uint64_t gpuMoves,
-            double   elapsedSec) const
-        {
-            const double avgSavedLen = (gamesWritten > 0) ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
-            const double avgPlayedLen = (gamesPlayed > 0) ? static_cast<double>(playedMoves) / gamesPlayed : 0.0;
-            const double speed = gpuMoves / std::max(elapsedSec, 1e-6);
-            const double filterRatio = (gamesWritten > 0) ? static_cast<double>(gamesPlayed) / gamesWritten : 1.0;
+            std::cout << "\033[K" << "-------------------------- TREE STATS -----------------------------\n";
+            std::cout << "\033[K" << " Q-Value: " << std::setw(6) << std::setprecision(3) << currentTree->getRootValue()
+                << " | Mem: " << std::setw(3) << (int)(currentTree->getMemoryUsage() * 100) << "%"
+                << " | Sims: " << currentTree->getSimulationCount() << "\n";
 
-            std::cout
-                << "[SelfPlay] " << std::setw(6) << gamesWritten
-                << " / " << target
-                << " written (" << std::fixed << std::setprecision(0)
-                << gamesPlayed << " played"
-                << ", x" << std::setprecision(1) << filterRatio << " filter)"
-                << " | Samples: " << totalSamples
-                << " | AvgLen(Saved): " << std::fixed << std::setprecision(1) << avgSavedLen << " ply"
-                << " | AvgLen(All): " << std::fixed << std::setprecision(1) << avgPlayedLen << " ply"
-                << " | Speed: " << std::fixed << std::setprecision(1) << speed << " m/s"
-                << "\r" << std::flush;
+            std::cout << "\033[K" << "----------------------- THREADPOOL STATE --------------------------\n";
+            std::cout << "\033[K" << " Queue Ready: " << std::setw(4) << this->m_threadPool->getReadyQueueSize()
+                << " | Eval: " << std::setw(4) << this->m_threadPool->getEvalQueueSize()
+                << " | Back: " << std::setw(4) << this->m_threadPool->getBackpropQueueSize() << "\n";
+            std::cout << "\033[K" << " Batch Size : " << std::setw(4) << m_backendCfg.inferenceBatchSize
+                << " | Free Contexts: " << this->m_threadPool->getFreeEventCount() << "\n";
+            std::cout << "\033[K" << "===================================================================\n" << std::flush;
         }
 
     public:
         SelfPlayHandler() = default;
         virtual ~SelfPlayHandler() = default;
 
-        void execute() override
-        {
+        void execute() override {
             std::signal(SIGINT, sigintHandler);
-
             const uint32_t target = m_trainingCfg.gamesPerIteration;
 
-            std::cout
-                << "[SelfPlay] Starting      : " << target << " games to write\n"
-                << "[SelfPlay] File          : " << m_datasetPath << "\n"
-                << "[SelfPlay] Parallelism   : " << m_backendCfg.numParallelGames
-                << " games | Batch: " << m_backendCfg.inferenceBatchSize << "\n"
-                << "[SelfPlay] Exploration   : Gumbel-Top-K (k="
-                << this->m_engineCfg.gumbelK << ")\n"
-                << "[SelfPlay] Policy target : "
-                << (this->m_engineCfg.gumbelCScale > 0.0f
-                    ? "Improved Q (cVisit=" + std::to_string(this->m_engineCfg.gumbelCVisit) +
-                    ", cScale=" + std::to_string(this->m_engineCfg.gumbelCScale) + ")"
-                    : "Visit counts (classic)")
-                << "\n";
-
-            const float thr = this->m_engineCfg.resignThreshold;
-            if (thr > -1.0f && thr < 0.0f)
-                std::cout << "[SelfPlay] Resign        : threshold=" << thr
-                << "  minPly=" << this->m_engineCfg.resignMinPly << "\n";
-            else
-                std::cout << "[SelfPlay] Resign        : disabled\n";
-
-            if (m_trainingCfg.drawSampleRate < 1.0f)
-                std::cout << "[SelfPlay] Draw filter   : " << m_trainingCfg.drawSampleRate * 100.f
-                << "% kept (iteration will be ~"
-                << std::fixed << std::setprecision(1) << (1.0f / m_trainingCfg.drawSampleRate)
-                << "x longer)\n";
-            else
-                std::cout << "[SelfPlay] Draw filter   : disabled\n";
-
+            // Allocate game contexts based on parallel configuration
             std::vector<GameContext> games(m_backendCfg.numParallelGames);
             size_t treeAllocIdx = 0;
             for (auto& g : games) {
@@ -169,69 +138,61 @@ namespace Core
                 resetGame(g);
             }
 
+            // Designate games that contribute to the iteration dataset
             for (size_t i = 0; i < games.size() && i < static_cast<size_t>(target); ++i)
                 games[i].isOfficial = true;
 
             std::ofstream outFile(m_datasetPath, std::ios::binary | std::ios::app);
-            if (!outFile.is_open())
-                throw std::runtime_error("Fatal: Cannot open dataset file: " + m_datasetPath);
+            if (!outFile.is_open()) throw std::runtime_error("Critical: Failed to open dataset file.");
 
-            uint32_t gamesWritten = 0;
-            uint32_t gamesPlayed = 0;
-            uint64_t writtenMoves = 0;
-            uint64_t playedMoves = 0;
-            uint64_t gpuMoves = 0;
-            uint64_t totalSamplesWritten = 0; // NOUVEAU : Compteur de samples générés
-
+            uint32_t gamesWritten = 0, gamesPlayed = 0;
+            uint64_t movesWritten = 0, totalGpuMoves = 0, totalSamples = 0;
             auto startTime = std::chrono::high_resolution_clock::now();
 
-            std::vector<TreeSearch<GT>*> activeTrees;
-            activeTrees.reserve(m_backendCfg.numParallelGames);
+            // Initial line buffer for the dashboard
+            std::cout << "\n\n\n\n\n\n\n\n\n\n\n";
 
-            while (gamesWritten < target && g_keepRunning.load(std::memory_order_acquire))
-            {
-                activeTrees.clear();
-
+            while (gamesWritten < target && g_keepRunning.load(std::memory_order_acquire)) {
+                std::vector<TreeSearch<GT>*> activeTrees;
                 for (auto& g : games) {
                     uint32_t cp = this->m_engine->getCurrentPlayer(g.currentState);
                     activeTrees.push_back(g.trees[cp]);
                 }
 
+                // Orchestrate multi-threaded search across all active games
                 this->m_threadPool->executeMultipleTrees(activeTrees, this->m_engineCfg.numSimulations);
 
-                for (auto& g : games)
-                {
-                    const uint32_t  cp = this->m_engine->getCurrentPlayer(g.currentState);
+                for (auto& g : games) {
+                    const uint32_t cp = this->m_engine->getCurrentPlayer(g.currentState);
                     TreeSearch<GT>* activeTree = g.trees[cp];
 
-                    if (g.isOfficial)
-                    {
+                    if (g.isOfficial) {
                         State povState = g.currentState;
                         this->m_engine->changeStatePov(cp, povState);
 
                         const size_t histSize = std::min<size_t>(g.actionHistory.size(), Defs::kMaxHistory);
                         StaticVec<Action, Defs::kMaxHistory> povHistory;
 
-                        for (size_t i = g.actionHistory.size() - histSize; i < g.actionHistory.size(); ++i)
-                        {
+                        for (size_t i = g.actionHistory.size() - histSize; i < g.actionHistory.size(); ++i) {
                             Action a = g.actionHistory[i];
                             this->m_engine->changeActionPov(cp, a);
                             povHistory.push_back(a);
                         }
 
-                        std::array<float, Defs::kNNInputSize> encodedState;
-                        StateEncoder<GT>::encode(povState, povHistory, encodedState);
+                        std::array<float, Defs::kNNInputSize> encoded;
+                        StateEncoder<GT>::encode(povState, povHistory, encoded);
 
                         g.replayBuffer.recordTurn(
-                            encodedState,
+                            encoded,
                             activeTree->getRootPolicy(),
                             activeTree->getRootLegalMovesMask(),
                             cp
                         );
                     }
 
-                    float currentTemp = (g.turnCount < 30) ? 1.0f : 0.0f;
-                    const Action action = activeTree->selectMove(currentTemp);
+                    // Move selection logic (Temperature-based exploration)
+                    float temp = (g.turnCount < this->m_engineCfg.temperatureDropTurn) ? 1.0f : 0.0f;
+                    const Action action = activeTree->selectMove(temp);
 
                     g.turnCount++;
                     this->m_engine->applyAction(action, g.currentState);
@@ -241,70 +202,49 @@ namespace Core
                     for (size_t p = 0; p < Defs::kNumPlayers; ++p)
                         g.trees[p]->advanceRoot(action, g.currentState);
 
-                    gpuMoves++;
+                    totalGpuMoves++;
 
-                    std::optional<GameResult> outcome = this->m_engine->getGameResult(g.currentState, g.hashHistory);
+                    // Check for terminal conditions or resignation
+                    auto outcome = this->m_engine->getGameResult(g.currentState, g.hashHistory);
+                    if (!outcome && g.turnCount > this->m_engineCfg.resignMinPly) {
+                        if (activeTree->getRootValue() < this->m_engineCfg.resignThreshold)
+                            outcome = this->m_engine->buildResignResult(cp);
+                    }
 
-                    if (!outcome.has_value())
-                        outcome = checkResign(g, cp);
-
-                    if (outcome.has_value())
-                    {
-                        if (g.isOfficial && gamesWritten < target)
-                        {
+                    if (outcome) {
+                        if (g.isOfficial && gamesWritten < target) {
                             gamesPlayed++;
-                            playedMoves += g.turnCount;
-
-                            // On récupère la taille exacte avant le flush
-                            const size_t samplesInGame = g.replayBuffer.size();
-
-                            const bool written = g.replayBuffer.flushToFile(
-                                outcome.value(), outFile, m_trainingCfg.drawSampleRate);
-
-                            if (written) {
-                                writtenMoves += g.turnCount;
-                                totalSamplesWritten += samplesInGame; // NOUVEAU
+                            size_t samplesInGame = g.replayBuffer.size();
+                            if (g.replayBuffer.flushToFile(*outcome, outFile, m_trainingCfg.drawSampleRate)) {
+                                movesWritten += g.turnCount;
+                                totalSamples += samplesInGame;
                                 gamesWritten++;
                             }
-
-                            if (gamesWritten % 10 == 0 || gamesWritten == target)
-                            {
-                                auto   now = std::chrono::high_resolution_clock::now();
-                                double elapsed = std::chrono::duration<double>(now - startTime).count();
-                                printProgress(gamesWritten, target, gamesPlayed, writtenMoves, playedMoves, totalSamplesWritten, gpuMoves, elapsed);
-                            }
                         }
-
                         resetGame(g);
                         g.isOfficial = (gamesWritten < target);
                     }
                 }
+
+                auto now = std::chrono::high_resolution_clock::now();
+                double elapsed = std::chrono::duration<double>(now - startTime).count();
+                printDashboard(gamesWritten, target, gamesPlayed, totalSamples, totalGpuMoves, elapsed, games[0]);
             }
 
-            outFile.close();
+            // --- FINAL SESSION SUMMARY ---
+            double totalSeconds = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - startTime).count();
 
-            auto   end = std::chrono::high_resolution_clock::now();
-            double sec = std::chrono::duration<double>(end - startTime).count();
-            int    hh = static_cast<int>(sec) / 3600;
-            int    mm = (static_cast<int>(sec) % 3600) / 60;
-            int    ss = static_cast<int>(sec) % 60;
+            std::cout << "\n" << std::string(60, '=') << "\n";
+            std::cout << " [SESSION SUMMARY]\n";
+            std::cout << "  - Total Samples Generated : " << totalSamples << "\n";
+            std::cout << "  - Games Saved to Disk     : " << gamesWritten << "\n";
+            std::cout << "  - Data Filtering Ratio    : " << std::fixed << std::setprecision(2)
+                << (static_cast<double>(gamesPlayed) / std::max(1u, gamesWritten)) << "x\n";
+            std::cout << "  - Mean Game Length        : " << (gamesWritten > 0 ? (double)movesWritten / gamesWritten : 0.0) << " plies\n";
+            std::cout << "  - Average Throughput      : " << std::fixed << std::setprecision(1) << (totalGpuMoves / totalSeconds) << " nodes/s\n";
+            std::cout << "  - Execution Time          : " << (int)totalSeconds / 3600 << "h " << ((int)totalSeconds % 3600) / 60 << "m\n";
+            std::cout << std::string(60, '=') << std::endl;
 
-            const double avgSavedLen = (gamesWritten > 0) ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
-            const double avgPlayedLen = (gamesPlayed > 0) ? static_cast<double>(playedMoves) / gamesPlayed : 0.0;
-            const double filterRate = (gamesWritten > 0) ? static_cast<double>(gamesPlayed) / gamesWritten : 1.0;
-
-            std::cout << "\n\n[SelfPlay] Finished!"
-                << "\n  Games written     : " << gamesWritten
-                << "\n  Games played      : " << gamesPlayed
-                << "\n  Samples generated : " << totalSamplesWritten
-                << "\n  Filter ratio      : x" << std::fixed << std::setprecision(2) << filterRate
-                << " (" << std::setprecision(1) << (100.0 / filterRate) << "% kept)"
-                << "\n  Avg Len (Saved)   : " << std::fixed << std::setprecision(1) << avgSavedLen << " ply"
-                << "\n  Avg Len (All)     : " << std::fixed << std::setprecision(1) << avgPlayedLen << " ply"
-                << "\n  GPU Moves (total) : " << gpuMoves
-                << "\n  Avg Speed         : " << std::fixed << std::setprecision(1) << (gpuMoves / std::max(sec, 1e-6)) << " moves/s"
-                << "\n  Total Time        : " << std::setfill('0') << std::setw(2) << hh << "h "
-                << std::setw(2) << mm << "m " << std::setw(2) << ss << "s\n";
         }
     };
 }
