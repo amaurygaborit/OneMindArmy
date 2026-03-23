@@ -49,8 +49,8 @@ backend:
   numParallelGames: 16384
 
   precision: fp16
-  numSearchThreads: 26
-  numBackpropThreads: 4
+  numSearchThreads: 20
+  numBackpropThreads: 10
   numInferenceThreads: 1
   queueScale: 3.0
   fastDrain: true
