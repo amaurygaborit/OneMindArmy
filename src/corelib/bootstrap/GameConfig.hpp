@@ -79,6 +79,8 @@ namespace Core
         uint32_t maxDepth;
         float    cPUCT;
         float    virtualLoss;
+        float    temperatureDropPly;
+
         uint32_t gumbelK;
         float    gumbelCVisit;
         float    gumbelCScale;
@@ -99,6 +101,8 @@ namespace Core
             maxDepth = loadVal<uint32_t>(node, "maxDepth", 1u, UINT32_MAX);
             cPUCT = loadVal<float>(node, "cPUCT", 0.0f, 100.0f);
             virtualLoss = loadVal<float>(node, "virtualLoss", 0.0f, 100.0f);
+			temperatureDropPly = loadVal<float>(node, "temperatureDropPly", 0.0f, 100.0f);
+
             gumbelK = loadVal<uint32_t>(node, "gumbelK", 0u, UINT32_MAX);
             gumbelCVisit = loadVal<float>(node, "gumbelCVisit", 0.0f, INFINITY);
             gumbelCScale = loadVal<float>(node, "gumbelCScale", 0.0f, INFINITY);

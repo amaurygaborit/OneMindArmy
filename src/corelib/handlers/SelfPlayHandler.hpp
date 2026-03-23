@@ -99,14 +99,13 @@ namespace Core
 
         void printProgress(uint32_t gamesWritten, uint32_t target,
             uint32_t gamesPlayed,
-            uint64_t writtenMoves, uint64_t gpuMoves,
+            uint64_t writtenMoves, uint64_t playedMoves, uint64_t gpuMoves,
             double   elapsedSec) const
         {
-            const double avgLen = (gamesWritten > 0)
-                ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
+            const double avgSavedLen = (gamesWritten > 0) ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
+            const double avgPlayedLen = (gamesPlayed > 0) ? static_cast<double>(playedMoves) / gamesPlayed : 0.0;
             const double speed = gpuMoves / std::max(elapsedSec, 1e-6);
-            const double filterRatio = (gamesWritten > 0)
-                ? static_cast<double>(gamesPlayed) / gamesWritten : 1.0;
+            const double filterRatio = (gamesWritten > 0) ? static_cast<double>(gamesPlayed) / gamesWritten : 1.0;
 
             std::cout
                 << "[SelfPlay] " << std::setw(6) << gamesWritten
@@ -114,7 +113,8 @@ namespace Core
                 << " written (" << std::fixed << std::setprecision(0)
                 << gamesPlayed << " played"
                 << ", x" << std::setprecision(1) << filterRatio << " filter)"
-                << " | AvgLen: " << std::fixed << std::setprecision(1) << avgLen << " ply"
+                << " | AvgLen(Saved): " << std::fixed << std::setprecision(1) << avgSavedLen << " ply"
+                << " | AvgLen(All): " << std::fixed << std::setprecision(1) << avgPlayedLen << " ply"
                 << " | Speed: " << std::fixed << std::setprecision(1) << speed << " m/s"
                 << "\r" << std::flush;
         }
@@ -130,8 +130,8 @@ namespace Core
             const uint32_t target = m_trainingCfg.gamesPerIteration;
 
             std::cout
-                << "[SelfPlay] Starting     : " << target << " games to write\n"
-                << "[SelfPlay] File         : " << m_datasetPath << "\n"
+                << "[SelfPlay] Starting      : " << target << " games to write\n"
+                << "[SelfPlay] File          : " << m_datasetPath << "\n"
                 << "[SelfPlay] Parallelism   : " << m_backendCfg.numParallelGames
                 << " games | Batch: " << m_backendCfg.inferenceBatchSize << "\n"
                 << "[SelfPlay] Exploration   : Gumbel-Top-K (k="
@@ -177,6 +177,7 @@ namespace Core
             uint32_t gamesWritten = 0;
             uint32_t gamesPlayed = 0;
             uint64_t writtenMoves = 0;
+            uint64_t playedMoves = 0;
             uint64_t gpuMoves = 0;
 
             auto startTime = std::chrono::high_resolution_clock::now();
@@ -208,7 +209,6 @@ namespace Core
 
                         const size_t histSize = std::min<size_t>(g.actionHistory.size(), Defs::kMaxHistory);
 
-                        // OPTIMISATION: Remplacement de AlignedVec par StaticVec pour supprimer l'allocation sur le tas
                         StaticVec<Action, Defs::kMaxHistory> povHistory;
 
                         for (size_t i = g.actionHistory.size() - histSize; i < g.actionHistory.size(); ++i)
@@ -221,7 +221,6 @@ namespace Core
                         std::array<float, Defs::kNNInputSize> encodedState;
                         StateEncoder<GT>::encode(povState, povHistory, encodedState);
 
-                        // 3. Enregistrement
                         g.replayBuffer.recordTurn(
                             encodedState,
                             activeTree->getRootPolicy(),
@@ -230,7 +229,13 @@ namespace Core
                         );
                     }
 
-                    const Action action = activeTree->selectMove(1.0f);
+                    // ----------------------------------------------------------------
+                    // NOUVEAU: Temperature Drop (AlphaZero Standard)
+                    // On explore stochastiquement pendant 30 plies, puis on joue "greedy" (0.0f)
+                    // Cela évite les grosses gaffes en fin de partie qui génèrent des nulles inutiles.
+                    // ----------------------------------------------------------------
+                    float currentTemp = (g.turnCount < 30) ? 1.0f : 0.0f;
+                    const Action action = activeTree->selectMove(currentTemp);
 
                     g.turnCount++;
                     this->m_engine->applyAction(action, g.currentState);
@@ -252,12 +257,13 @@ namespace Core
                         if (g.isOfficial && gamesWritten < target)
                         {
                             gamesPlayed++;
+                            playedMoves += g.turnCount; // Sauvegarde le compte total pour cette partie jouée
 
                             const bool written = g.replayBuffer.flushToFile(
                                 outcome.value(), outFile, m_trainingCfg.drawSampleRate);
 
                             if (written) {
-                                writtenMoves += g.turnCount;
+                                writtenMoves += g.turnCount; // Sauvegarde séparée pour les parties écrites
                                 gamesWritten++;
                             }
 
@@ -265,7 +271,7 @@ namespace Core
                             {
                                 auto   now = std::chrono::high_resolution_clock::now();
                                 double elapsed = std::chrono::duration<double>(now - startTime).count();
-                                printProgress(gamesWritten, target, gamesPlayed, writtenMoves, gpuMoves, elapsed);
+                                printProgress(gamesWritten, target, gamesPlayed, writtenMoves, playedMoves, gpuMoves, elapsed);
                             }
                         }
 
@@ -283,7 +289,8 @@ namespace Core
             int    mm = (static_cast<int>(sec) % 3600) / 60;
             int    ss = static_cast<int>(sec) % 60;
 
-            const double avgLen = (gamesWritten > 0) ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
+            const double avgSavedLen = (gamesWritten > 0) ? static_cast<double>(writtenMoves) / gamesWritten : 0.0;
+            const double avgPlayedLen = (gamesPlayed > 0) ? static_cast<double>(playedMoves) / gamesPlayed : 0.0;
             const double filterRate = (gamesWritten > 0) ? static_cast<double>(gamesPlayed) / gamesWritten : 1.0;
 
             std::cout << "\n\n[SelfPlay] Finished!"
@@ -291,7 +298,8 @@ namespace Core
                 << "\n  Games played      : " << gamesPlayed
                 << "\n  Filter ratio      : x" << std::fixed << std::setprecision(2) << filterRate
                 << " (" << std::setprecision(1) << (100.0 / filterRate) << "% kept)"
-                << "\n  Avg Game Length   : " << std::fixed << std::setprecision(1) << avgLen << " ply"
+                << "\n  Avg Len (Saved)   : " << std::fixed << std::setprecision(1) << avgSavedLen << " ply"
+                << "\n  Avg Len (All)     : " << std::fixed << std::setprecision(1) << avgPlayedLen << " ply"
                 << "\n  GPU Moves (total) : " << gpuMoves
                 << "\n  Avg Speed         : " << std::fixed << std::setprecision(1) << (gpuMoves / std::max(sec, 1e-6)) << " moves/s"
                 << "\n  Total Time        : " << std::setfill('0') << std::setw(2) << hh << "h "
