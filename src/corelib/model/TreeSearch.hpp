@@ -160,11 +160,13 @@ namespace Core
 
         void applyRootExploration(uint32_t nodeIdx) {
             if (m_config.gumbelK == 0) return;
-            uint8_t old_flags = m_nodeFlags[nodeIdx].val.fetch_or(FLAG_GUMBEL_APPLIED, std::memory_order_acq_rel);
-            if (old_flags & FLAG_GUMBEL_APPLIED) return;
 
+            // FIX 1 : Vérifier la présence d'enfants AVANT d'altérer les flags atomiques
             uint32_t nChildren = m_nodeNumChildren[nodeIdx].val.load(std::memory_order_relaxed);
             if (nChildren == 0) return;
+
+            uint8_t old_flags = m_nodeFlags[nodeIdx].val.fetch_or(FLAG_GUMBEL_APPLIED, std::memory_order_acq_rel);
+            if (old_flags & FLAG_GUMBEL_APPLIED) return;
 
             uint32_t startIdx = m_nodeFirstChild[nodeIdx].val.load(std::memory_order_relaxed);
             uint32_t activeCount = 0;
@@ -269,7 +271,18 @@ namespace Core
                 }
 
                 if (!(flags & FLAG_EXPANDED)) {
-                    uint8_t expected = FLAG_NONE;
+                    // On vérifie si quelqu'un d'autre est DÉJÀ en train d'étendre
+                    if (flags & FLAG_EXPANDING) {
+                        ctx.collision = true;
+                        ctx.isTerminal = true;
+                        ctx.leafNodeIdx = currIdx;
+                        ctx.trueWDL.fill(0.0f);
+                        return false;
+                    }
+
+                    // On s'attend à ce que les flags soient tels qu'on les a lus
+                    uint8_t expected = flags;
+
                     if (m_nodeFlags[currIdx].val.compare_exchange_strong(expected, FLAG_EXPANDING, std::memory_order_acquire)) {
                         ctx.leafNodeIdx = currIdx;
 

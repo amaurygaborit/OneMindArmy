@@ -6,7 +6,7 @@
 name: chess
 
 engine:
-  numSimulations: 100000
+  numSimulations: 200
   maxDepth: 128
 
   cPUCT: 1.5
@@ -18,9 +18,9 @@ engine:
   gumbelCVisit: 50.0
   gumbelCScale: 0.0
 
-  maxNodes: 20000000           # Allow the tree to grow huge for one game
-  memoryThreshold: 0.90
-  reuseTree: false         # Reuse tree between turns to think on opponent's time
+  maxNodes: 50000           # Allow the tree to grow huge for one game
+  memoryThreshold: 0.8
+  reuseTree: true         # Reuse tree between turns to think on opponent's time
 
   resignThreshold: -0.95
   resignMinPly: 200

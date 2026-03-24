@@ -18,8 +18,8 @@ engine:
   gumbelCVisit: 50.0
   gumbelCScale: 1.5
 
-  maxNodes: 50000
-  memoryThreshold: 0.8
+  maxNodes: 500000
+  memoryThreshold: 0.9
   reuseTree: true
 
   resignThreshold: -0.90
