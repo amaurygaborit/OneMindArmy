@@ -95,7 +95,7 @@ add_subdirectory(src/corelib)
 add_subdirectory(src/games/chess)
 
 # Main executable
-add_executable(onemindarmy src/corelib/main.cpp "src/games/rubik/RubikEngine.cpp")
+add_executable(onemindarmy src/corelib/main.cpp)
 
 target_include_directories(onemindarmy PRIVATE ${TRT_INCLUDE_DIR})
 
