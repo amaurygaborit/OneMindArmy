@@ -33,10 +33,10 @@ namespace Chess
 
     void ChessRenderer::specificSetup(const YAML::Node& config)
     {
-        std::cout << "ChessRenderer setup called\n";
+        std::cout << "[ChessRenderer] Setup initialized.\n";
 
-        m_renderRawState = Core::loadVal<bool>(config["specific"]["render"], "renderRawState", false, true);
-        m_replaceRendering = Core::loadVal<bool>(config["specific"]["render"], "replaceRendering", false, true);
+        m_renderRawState = Core::loadVal<bool>(config["specific"], "renderRawState", false, true);
+        m_replaceRendering = Core::loadVal<bool>(config["specific"], "replaceRendering", false, true);
     }
 
     void ChessRenderer::renderFactState(const State& state) const

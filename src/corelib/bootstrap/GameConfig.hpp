@@ -127,8 +127,11 @@ namespace Core
         float learningRate = 0.0f;
         float weightDecay = 0.0f;
         float valueLossWeight = 0.0f;
+
+        float drawScore = 0.0f;
+        float drawSampleRate = 0.0f;
+
 		uint32_t currentIteration = 0;
-		float drawSampleRate = 0.0f;
 
         void load(const YAML::Node& root, const std::string& runMode)
         {
@@ -146,8 +149,11 @@ namespace Core
             learningRate = loadVal<float>(node, "learningRate", 0.0000001f, 1.0f);
             weightDecay = loadVal<float>(node, "weightDecay", 0.0f, 1.0f);
             valueLossWeight = loadVal<float>(node, "valueLossWeight", 0.0f, 10.0f);
-			currentIteration = loadVal<uint32_t>(node, "currentIteration", 0u, UINT32_MAX);
+
+            drawScore = loadVal<float>(node, "drawScore", 0.0f, 1.0f);
             drawSampleRate = loadVal<float>(node, "drawSampleRate", 0.0f, 1.0f);
+
+			currentIteration = loadVal<uint32_t>(node, "currentIteration", 0u, UINT32_MAX);
         }
     };
 
@@ -228,7 +234,7 @@ namespace Core
             if (!node) {
                 if (runMode == "play")
                     throw std::runtime_error("Config Error: Missing 'session' block (Mandatory for match play).");
-                return; // Ignor� proprement en training
+                return;
             }
 
             numAIs = loadVal<uint32_t>(node, "numAIs", 0u, GameConfig::kNumPlayers);

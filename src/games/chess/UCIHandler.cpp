@@ -46,7 +46,7 @@ namespace Chess
 
     void UCIHandler::specificSetup(const YAML::Node& config)
     {
-        std::cout << "UCIHandler setup called\n";
+        std::cout << "[UCIHandler] Setup initialized.\n";
 
         std::shared_ptr<ChessEngine> concreteEngine =
             std::static_pointer_cast<ChessEngine>(m_engine);

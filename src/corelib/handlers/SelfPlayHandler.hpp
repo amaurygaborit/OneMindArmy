@@ -144,6 +144,8 @@ namespace Core
 
         void specificSetup(const YAML::Node& config) override
         {
+            std::cout << "[SelfPlayHandler] Setup initialized.\n";
+
             m_backendCfg.load(config, "train");
             m_trainingCfg.load(config, "train");
 
@@ -597,6 +599,7 @@ namespace Core
                         ? 1.0f : 0.0f;
 
                     const Action action = activeTree->selectMove(temperature);
+                    const float resignQ = activeTree->getRootValue();
 
                     g.turnCount++;
                     dash.totalMoves++;
@@ -618,7 +621,7 @@ namespace Core
                     // the configured threshold from their own perspective
                     if (!outcome
                         && g.turnCount > this->m_engineCfg.resignMinPly
-                        && activeTree->getRootValue() < this->m_engineCfg.resignThreshold)
+                        && resignQ < this->m_engineCfg.resignThreshold)
                     {
                         outcome = this->m_engine->buildResignResult(cp);
                     }
@@ -636,7 +639,10 @@ namespace Core
                             const size_t samples = g.replayBuffer.size();
 
                             if (g.replayBuffer.flushToFile(
-                                *outcome, outFile, m_trainingCfg.drawSampleRate))
+                                *outcome,
+                                outFile,
+                                m_trainingCfg.drawSampleRate,
+                                m_trainingCfg.drawScore))
                             {
                                 dash.totalPlies += g.turnCount;
                                 dash.totalSamples += samples;
@@ -667,5 +673,4 @@ namespace Core
             printSummary(dash, target, totalTime, m_datasetPath);
         }
     };
-
-} // namespace Core
+}

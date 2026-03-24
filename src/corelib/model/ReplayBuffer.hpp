@@ -82,7 +82,8 @@ namespace Core
         bool flushToFile(
             const GameResult& finalOutcome,
             std::ofstream& outFile,
-            float drawSampleRate)
+            float drawSampleRate,
+            float drawScore)
         {
             if (m_samples.empty()) { return false; }
 
@@ -127,6 +128,29 @@ namespace Core
             // 3. Application vectorisée (plus besoin de modulos, juste une copie mémoire)
             for (size_t i = 0; i < m_samples.size(); ++i) {
                 m_samples[i].wdlTarget = precomputedWDL[m_viewers[i]];
+            }
+
+            // Draw score adjustment : remap draw outcomes
+            // drawScore=0.0 → aucun effet
+            // drawScore=0.5 → nulle encodée comme 50% défaite
+            if (drawScore > 1e-6f)
+            {
+                for (size_t i = 0; i < m_samples.size(); ++i)
+                {
+                    auto& wdl = m_samples[i].wdlTarget;
+                    for (uint32_t p = 0; p < Defs::kNumPlayers; ++p)
+                    {
+                        float& w = wdl[p * 3 + 0];
+                        float& d = wdl[p * 3 + 1];
+                        float& l = wdl[p * 3 + 2];
+
+                        // Transfère une fraction du D vers L
+                        // Draw → [W, D*(1-s), L + D*s]
+                        float transfer = d * drawScore;
+                        d -= transfer;
+                        l += transfer;
+                    }
+                }
             }
 
             // 4. Dump binaire brut

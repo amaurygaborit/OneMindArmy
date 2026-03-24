@@ -9,7 +9,7 @@ namespace Chess
 
     void ChessRequester::specificSetup(const YAML::Node& config)
     {
-        std::cout << "ChessRequester setup called\n";
+        std::cout << "[ChessRequester] Setup initialized.\n";
     }
 
     Action ChessRequester::convertToAction(const std::string& moveStr, const State state) const

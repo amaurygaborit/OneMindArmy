@@ -6,19 +6,19 @@
 name: chess
 
 engine:
-  numSimulations: 1000
+  numSimulations: 100000
   maxDepth: 128
 
   cPUCT: 1.5
-  fpuValue: 0.25            # Assume unknown moves are neutral instead of bad
+  fpuValue: 0.0            # Assume unknown moves are neutral instead of bad
   virtualLoss: 2.0         # Lower penalty needed for single game
-  temperatureDropTurn: 0
+  temperatureDropTurn: 30
 
-  gumbelK: 8
+  gumbelK: 0
   gumbelCVisit: 50.0
-  gumbelCScale: 1.0
+  gumbelCScale: 0.0
 
-  maxNodes: 1000000           # Allow the tree to grow huge for one game
+  maxNodes: 20000000           # Allow the tree to grow huge for one game
   memoryThreshold: 0.90
   reuseTree: false         # Reuse tree between turns to think on opponent's time
 
@@ -37,7 +37,7 @@ backend:
   numBackpropThreads: 2
   numInferenceThreads: 1
 
-  queueScale: 3.0
+  queueScale: 4.0
   fastDrain: true
 
 session:
@@ -54,8 +54,10 @@ session:
 
 # --- 6. GAME SPECIFIC (Full UI) ---
 specific:
-  render:
-    whiteAtBottom: true
-    showCoordinates: true
-    replaceRendering: false
-    renderRawState: false
+  maxPly: 512
+  randomOpeningPlies: 0
+
+  whiteAtBottom: true
+  showCoordinates: true
+  replaceRendering: false
+  renderRawState: false

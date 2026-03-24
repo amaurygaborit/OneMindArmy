@@ -3,33 +3,33 @@ network:
   dModel: 256
   nHeads: 8
   nLayers: 10
-  dimFeedforward: 512
+  dimFeedforward: 1024
 
 engine:
   numSimulations: 200
   maxDepth: 128
 
   cPUCT: 1.5
-  fpuValue: 0.25
+  fpuValue: 0.1
   virtualLoss: 0.0
   temperatureDropTurn: 30
 
-  gumbelK: 8
+  gumbelK: 4
   gumbelCVisit: 50.0
-  gumbelCScale: 1.0
+  gumbelCScale: 1.5
 
   maxNodes: 50000
-  memoryThreshold: 0.9
-  reuseTree: false
+  memoryThreshold: 0.8
+  reuseTree: true
 
-  resignThreshold: -0.9
-  resignMinPly: 30
+  resignThreshold: -0.90
+  resignMinPly: 40
 
 training:
   gamesPerIteration: 5000
-  slidingWindowSamples: 7500000
-  maxWindowIterations: 15
-  epochs: 1
+  slidingWindowSamples: 5000000
+  maxWindowIterations: 20
+  epochs: 2
   trainBatchSize: 1024
 
   learningRate: 0.001
@@ -39,18 +39,25 @@ training:
 
   weightDecay: 0.0001
   valueLossWeight: 1.0
-  drawSampleRate: 0.2
+
+  drawScore: 0.35              # // drawScore=0.0 → aucun effet, drawScore=1.0 → les nuls sont aussi mauvais que les défaites
+  drawSampleRate: 1.0
+
   currentIteration: 0
   logEveryNBatches: 100
 
 backend:
   numGPUs: auto
-  inferenceBatchSize: 1024
-  numParallelGames: 8192
+  inferenceBatchSize: 256
+  numParallelGames: 512
 
   precision: fp16
-  numSearchThreads: 26
-  numBackpropThreads: 4
+  numSearchThreads: 12
+  numBackpropThreads: 5
   numInferenceThreads: 1
-  queueScale: 3.0
+  queueScale: 4.0
   fastDrain: true
+
+specific:
+  maxPly: 250
+  randomOpeningPlies: 8

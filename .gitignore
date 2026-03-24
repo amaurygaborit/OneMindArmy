@@ -9,6 +9,7 @@
 *.sln.docstates
 
 scripts/__pycache__/
+data/
 
 # ==============================================================================
 # Build & CMake directories

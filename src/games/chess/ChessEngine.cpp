@@ -16,10 +16,13 @@ namespace Chess
 
 	void ChessEngine::specificSetup(const YAML::Node& config)
 	{
-		std::cout << "ChessEngine setup called\n";
+		std::cout << "[ChessEngine] Setup initialized.\n";
 
 		ZobristHasher::ignoreMetaType(HALF_MOVE);
 		ZobristHasher::ignoreMetaType(FULL_MOVE);
+
+		m_maxPly = Core::loadVal<uint32_t>(config["specific"], "maxPly", 0u, UINT32_MAX);
+		m_randomOpeningPlies = Core::loadVal<uint32_t>(config["specific"], "randomOpeningPlies", 0u, UINT32_MAX);
 	}
 
 	void ChessEngine::stateToBB(const State& state, StateBB& outStateBB) const
@@ -41,7 +44,23 @@ namespace Chess
 	void ChessEngine::getInitialState(const uint32_t player, State& outState) const
 	{
 		FenParser::getFenState("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1", outState);
-		//FenParser::getFenState("3k4/8/p3p3/P1p1P1p1/2P3P1/8/3K4/8 w - - 0 1", outState);
+		
+		// Ouverture aléatoire : force des positions de départ diversifiées
+		if (m_randomOpeningPlies == 0) return;
+
+		thread_local std::mt19937 rng{ std::random_device{}() };
+
+		const std::array<uint64_t, 0> dummyHashHistory;
+		for (uint32_t i = 0; i < m_randomOpeningPlies; ++i)
+		{
+			auto actions = getValidActions(outState, dummyHashHistory);
+			if (actions.empty()) break;
+
+			std::uniform_int_distribution<size_t> dist(0, actions.size() - 1);
+			const Action& rndAction = actions[dist(rng)];
+
+			applyAction(rndAction, outState);
+		}
 	}
 
 	uint32_t ChessEngine::getCurrentPlayer(const State& state) const
@@ -417,9 +436,7 @@ namespace Chess
 		constexpr std::array<float, 6> WDL_BLACK = { 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f };
 
 		// 1. HARD CAP
-		// Note : 200 plies (100 coups), c'est bien, mais AlphaZero utilise souvent 512. 
-		// Garde 200 si tu veux forcer des parties courtes à l'entraînement.
-		if (hashHistory.size() >= 200) {
+		if (hashHistory.size() >= m_maxPly) {
 			return GameResult{ WDL_DRAW, static_cast<uint32_t>(ChessEndReason::MaxPlyReached) };
 		}
 

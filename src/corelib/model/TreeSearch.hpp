@@ -450,7 +450,7 @@ namespace Core
 
             bool reused = false;
             if (m_config.reuseTree && m_rootIdx != UINT32_MAX &&
-                m_nodeCount.load(std::memory_order_relaxed) < (m_config.maxNodes * 0.8f))
+                m_nodeCount.load(std::memory_order_relaxed) < (m_config.maxNodes * m_config.memoryThreshold))
             {
                 uint8_t flags = m_nodeFlags[m_rootIdx].val.load(std::memory_order_acquire);
                 if (flags & FLAG_EXPANDED) {

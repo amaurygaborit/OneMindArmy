@@ -11,6 +11,10 @@ namespace Chess
         USING_GAME_TYPES(ChessTypes);
 
     private:
+		uint32_t m_maxPly = 0;
+        uint32_t m_randomOpeningPlies = 0;
+
+    private:
         void stateToBB(const State& state, StateBB& out) const;
 
         bool isFiftyMoveRule(const State& state) const;

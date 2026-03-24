@@ -29,7 +29,7 @@ namespace Core
     private:
         void specificSetup(const YAML::Node& /*config*/) override
         {
-            std::cout << "[InferenceHandler] Setup complete.\n";
+            std::cout << "[InferenceHandler] Setup initialized.\n";
         }
 
     public:
@@ -89,8 +89,10 @@ namespace Core
                         this->m_treeSearch[currentPlayer].get(),
                         this->m_engineCfg.numSimulations);
 
-                    // Temperature = 0.0f force le coup le plus exploré/robuste
-                    selectedAction = this->m_treeSearch[currentPlayer]->selectMove(0.0f);
+                    const float temperature =
+                        (turnCount < this->m_engineCfg.temperatureDropTurn)
+                        ? 1.0f : 0.0f;
+                    selectedAction = this->m_treeSearch[currentPlayer]->selectMove(temperature);
 
                     auto t1 = std::chrono::high_resolution_clock::now();
                     turnTimeMs = std::chrono::duration<double, std::milli>(t1 - t0).count();

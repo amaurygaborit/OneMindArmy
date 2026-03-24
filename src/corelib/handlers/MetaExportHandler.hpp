@@ -26,6 +26,8 @@ namespace Core
 
         void specificSetup(const YAML::Node& config) override
         {
+            std::cout << "[MetaExportHandler] Setup initialized.\n";
+
             if (!config["name"]) {
                 throw std::runtime_error("Config Error: Missing 'name' field in YAML.");
             }
