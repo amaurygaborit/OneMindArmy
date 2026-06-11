@@ -1,63 +1,69 @@
-name: chess
+# ==============================================================================
+# ONE MIND ARMY - TRAIN CONFIGURATION
+# Game: Chess | Mode: Self-Play Generation & Model Optimization
+# ==============================================================================
+
+name: chess                          # Target environment identifier for dataset generation
+
 network:
-  dModel: 256
-  nHeads: 8
-  nLayers: 10
-  dimFeedforward: 1024
+  dModel: 256                        # Embedding dimension size across the transformer blocks
+  nHeads: 8                          # Parallel attention mechanisms to capture diverse spatial board patterns
+  nLayers: 10                        # Depth of the transformer for hierarchical feature extraction
+  dimFeedforward: 1024               # Hidden dimension size in FFN blocks to expand representational capacity
 
 engine:
-  numSimulations: 200
-  maxDepth: 128
-
-  cPUCT: 1.5
-  fpuValue: 0.1
-  virtualLoss: 0.0
-  temperatureDropTurn: 30
-
-  gumbelK: 4
-  gumbelCVisit: 50.0
-  gumbelCScale: 1.5
-
-  maxNodes: 500000
-  memoryThreshold: 0.9
-  reuseTree: true
-
-  resignThreshold: -0.90
-  resignMinPly: 40
+  numSimulations: 200                # Lower rollout count to maximize game generation throughput over absolute quality
+  maxDepth: 128                      # Hard limit on tree depth to prevent memory overflow
+  
+  cPUCT: 1.5                         # Standard exploration constant to discover new tactical lines
+  fpuValue: 0.1                      # Slight optimism for unvisited nodes to broaden the tree width during training
+  virtualLoss: 0.0                   # Disabled as diverse thread paths are less critical at low simulation counts
+  temperatureDropTurn: 30            # Maintains exploration to ensure diverse mid-game positions in the dataset
+  
+  gumbelK: 4                         # Enables Gumbel sampling on the top 4 actions for faster policy convergence
+  gumbelCVisit: 50.0                 # Visit count scaling for the Gumbel sequential halving algorithm
+  gumbelCScale: 1.5                  # Temperature scaling applied to Gumbel distribution logits
+  
+  maxNodes: 200000                   # Restricted tree memory footprint optimized for parallel rapid generation
+  memoryThreshold: 0.9               # Triggers tree pruning when memory nears capacity
+  reuseTree: true                    # Retains state evaluations to accelerate sequential turns in self-play
+  
+  resignThreshold: -0.90             # Abandons clearly lost positions early to save generation time
+  resignMinPly: 40                   # Ensures early blunders don't instantly end games before the network learns
 
 training:
-  gamesPerIteration: 5000
-  slidingWindowSamples: 5000000
-  maxWindowIterations: 20
-  epochs: 2
-  trainBatchSize: 1024
-
-  learningRate: 0.001
-  lrMinFactor: 0.1
-  lrDecayType: "cosine"        # Options: "exponential", "linear", "cosine", "constant"
-  lrDecayIterations: 100       # Le nombre d'itérations globales pour atteindre lrMinFactor
-
-  weightDecay: 0.0001
-  valueLossWeight: 1.0
-
-  drawScore: 0.35              # // drawScore=0.0 → aucun effet, drawScore=1.0 → les nuls sont aussi mauvais que les défaites
-  drawSampleRate: 1.0
-
-  currentIteration: 0
-  logEveryNBatches: 100
+  gamesPerIteration: 5000            # Volume of self-play games required before triggering a network weight update
+  slidingWindowSamples: 5000000      # Replay buffer capacity limit to prevent catastrophic forgetting of old tactics
+  maxWindowIterations: 20            # Number of past generations retained to maintain dataset diversity
+  epochs: 1                          # Single pass over data per update to prevent overfitting on fresh samples
+  trainBatchSize: 1024               # Large batch size to stabilize gradients during backpropagation
+  
+  learningRate: 0.001                # Initial optimizer step size
+  lrMinFactor: 0.1                   # Floor multiplier for the learning rate decay schedule
+  lrDecayType: "cosine"              # Smooth reduction strategy for the learning rate to ensure stable convergence
+  lrDecayIterations: 100             # Global iteration target to reach the minimum learning rate factor
+  
+  weightDecay: 0.0001                # L2 regularization to penalize overly complex model weights
+  valueLossWeight: 1.0               # Balances policy head and value head gradients during loss calculation
+  
+  drawScore: 0.35                    # Value target for tied games (mildly penalizes draws to encourage decisive play)
+  drawSampleRate: 1.0                # Proportion of drawn games kept to balance the win/loss dataset distribution
+  
+  currentIteration: 0                # Tracks progress to allow seamless resuming from checkpoints
+  logEveryNBatches: 100              # Frequency of emitting loss metrics to monitoring tools (TensorBoard/stdout)
 
 backend:
-  numGPUs: auto
-  inferenceBatchSize: 256
-  numParallelGames: 512
-
-  precision: fp16
-  numSearchThreads: 12
-  numBackpropThreads: 5
-  numInferenceThreads: 1
-  queueScale: 4.0
-  fastDrain: true
+  numGPUs: auto                      # Distributes massive self-play generation across all available hardware
+  inferenceBatchSize: 256            # Large batch size optimized for maximum GPU throughput
+  numParallelGames: 512              # Massive concurrency to fully saturate GPU cores during self-play
+  
+  precision: fp16                    # Doubles throughput and halves memory bandwidth via TensorRT acceleration
+  numSearchThreads: 12               # High thread count to balance CPU tree traversal with GPU batching
+  numBackpropThreads: 5              # Handles massive concurrent tree updates across hundreds of games
+  numInferenceThreads: 1             # Manages dense queue traffic from parallel games to the GPU
+  queueScale: 4.0                    # Large buffer to handle synchronous burst requests from 512 parallel games
+  fastDrain: true                    # Accelerates batch dispatch to keep GPUs constantly fed
 
 specific:
-  maxPly: 250
-  randomOpeningPlies: 8
+  maxPly: 250                        # Hard limit to curtail endless endgames and keep generated data fresh
+  randomOpeningPlies: 8              # Forces diverse starting positions to cover the entire state space during training

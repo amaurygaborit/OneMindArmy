@@ -6,7 +6,8 @@ file(GLOB_RECURSE CORE_CPP_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/*.hpp
 )
-# Exclude main.cpp to prevent multiple definition errors in the executable
+# Excludes main.cpp from the static library to prevent "multiple definition" 
+# linker errors when the final executable is built.
 list(FILTER CORE_CPP_SOURCES EXCLUDE REGEX "main\\.cpp$")
 
 file(GLOB_RECURSE CORE_CUDA_SOURCES CONFIGURE_DEPENDS
@@ -15,9 +16,11 @@ file(GLOB_RECURSE CORE_CUDA_SOURCES CONFIGURE_DEPENDS
 )
 
 # ------------------------------------------------------------------------------
-# THE FIX: Dummy CPP file generator
-# MSVC will refuse to output a .lib file if the library only contains .hpp files.
-# We inject a dummy .cpp file to guarantee the archiver runs.
+# MSVC STATIC ARCHIVER FIX
+# MSVC's lib.exe tool will refuse to generate a .lib file if the source list 
+# consists entirely of header (.hpp) files (which is common in template-heavy 
+# architectures like OneMindArmy). We inject an auto-generated dummy .cpp 
+# file to force the compiler to output a valid translation unit.
 # ------------------------------------------------------------------------------
 set(DUMMY_FILE ${CMAKE_CURRENT_BINARY_DIR}/corelib_dummy.cpp)
 file(WRITE ${DUMMY_FILE} "// Auto-generated to force MSVC to emit a .lib for template-heavy targets\n")

@@ -7,7 +7,6 @@
 #include <type_traits>
 #include <yaml-cpp/yaml.h>
 
-// Core Architecture
 #include "TypeResolver.hpp"
 #include "../interfaces/IHandler.hpp"
 #include "../model/ThreadPool.hpp"
@@ -15,13 +14,14 @@
 #include "../model/NeuralNet.hpp"
 #include "GameConfig.hpp" 
 
-// Handlers
 #include "../handlers/SelfPlayHandler.hpp"
 #include "../handlers/InferenceHandler.hpp"
 #include "../handlers/MetaExportHandler.hpp"
 
 namespace Core
 {
+    // SFINAE check: Determines at compile-time if a specific game has implemented 
+    // a custom execution handler overriding the default play/train pipelines.
     template <typename, typename = void>
     struct has_custom_handler : std::false_type {};
 
@@ -29,7 +29,9 @@ namespace Core
     struct has_custom_handler<T, std::void_t<typename T::Handler>> : std::true_type {};
 
     // ========================================================================
-    // GAME BOOTSTRAPPER (The Central Factory)
+    // GAME BOOTSTRAPPER 
+    // Acts as a Dependency Injection container. It resolves concrete types 
+    // based on the templated GameConfig and wires the core architecture together.
     // ========================================================================
     template<typename GameConfig>
     class GameBootstrapper : public IGameRunner
@@ -50,14 +52,13 @@ namespace Core
             std::cout << "\n[Bootstrapper] Initializing Game Module: [" << m_name << "]\n";
             std::cout << "[Bootstrapper] Target Execution Mode: [" << mode << "]\n";
 
-            // --- 1. CONFIGURATION LOADING & STRICT VALIDATION ---
-            NetworkConfig             networkConfig;  networkConfig.load(config, mode);
-            EngineConfig              engineConfig;   engineConfig.load(config, mode);
-            TrainingConfig            trainingConfig; trainingConfig.load(config, mode);
-            BackendConfig             backendConfig;  backendConfig.load(config, mode);
+            NetworkConfig        networkConfig;  networkConfig.load(config, mode);
+            EngineConfig         engineConfig;   engineConfig.load(config, mode);
+            TrainingConfig       trainingConfig; trainingConfig.load(config, mode);
+            BackendConfig        backendConfig;  backendConfig.load(config, mode);
             SessionConfig<GameConfig> sessionConfig;  sessionConfig.load(config, mode);
 
-            // --- 2. HANDLER ROUTING ---
+            // Dynamically route to the correct execution loop based on CLI arguments
             std::unique_ptr<IHandler<GT>> handler;
 
             if (mode == "train") {
@@ -81,11 +82,9 @@ namespace Core
                 throw std::invalid_argument("Fatal Error: Invalid run_mode '" + mode + "'. Valid options are: play, train, export-meta, custom.");
             }
 
-            // --- 3. CORE ENGINE INSTANTIATION ---
             auto engine = std::make_shared<EngineT>();
             engine->setup(config);
 
-            // --- 4. CONDITIONAL HEAVY BACKEND INSTANTIATION ---
             std::unique_ptr<ThreadPool<GT>> threadPool = nullptr;
             AlignedVec<std::unique_ptr<TreeSearch<GT>>> treeSearches;
 
@@ -101,9 +100,9 @@ namespace Core
                     engine, std::move(neuralNets), backendConfig, engineConfig
                 );
 
-                // --- Formule multi-arbres ---
-                // En SelfPlay : Les deux joueurs sont des IA (GT::kNumPlayers * ParallelGames)
-                // En Match : Seules les IA demandées par l'utilisateur ont un arbre (numAIs * ParallelGames)
+                // Exact tree allocation calculation to optimize VRAM footprint:
+                // Self-Play: Allocates trees for both sides across all parallel games.
+                // Inference: Only allocates trees for active AI participants.
                 uint32_t actualNumAIs = (mode == "play" || mode == "custom") ? sessionConfig.numAIs : GT::kNumPlayers;
                 uint32_t numTreesNeeded = actualNumAIs * backendConfig.numParallelGames;
 
@@ -115,12 +114,10 @@ namespace Core
                 }
             }
 
-            // --- 5. I/O INSTANTIATION (Requester & Renderer) ---
-                        // On les laisse null par défaut (Mode Headless)
+            // Lazy initialization for I/O bounds: Keeps training completely headless
             std::unique_ptr<RequesterT> requester = nullptr;
             std::unique_ptr<RendererT> renderer = nullptr;
 
-            // On ne les instancie que si un humain est impliqué
             if (mode == "play" || mode == "custom")
             {
                 renderer = std::make_unique<RendererT>();
@@ -128,10 +125,9 @@ namespace Core
 
                 requester = std::make_unique<RequesterT>();
                 requester->setup(config);
-                
             }
 
-            // --- 6. DEPENDENCY INJECTION & EXECUTION ---
+            // Inject all dependencies into the selected pipeline handler
             handler->setup(
                 config, engine, std::move(treeSearches), std::move(threadPool),
                 std::move(requester), std::move(renderer), sessionConfig, engineConfig
@@ -141,6 +137,7 @@ namespace Core
         }
     };
 
+    // Auto-registration mechanism utilizing static initialization
     template<typename GameConfig>
     struct AutoGameRegister
     {

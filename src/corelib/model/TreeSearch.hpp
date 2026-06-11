@@ -17,6 +17,7 @@
 
 namespace Core
 {
+    // Minimal atomic wrapper allowing std::atomic to be used inside aligned containers.
     template<typename T>
     struct AtomicVal {
         std::atomic<T> val;
@@ -25,6 +26,11 @@ namespace Core
         AtomicVal& operator=(const AtomicVal& o) { val.store(o.val.load(std::memory_order_relaxed), std::memory_order_relaxed); return *this; }
     };
 
+    // ========================================================================
+    // EVALUATION CONTEXT
+    // Tracks a single MCTS trajectory traversing the tree from root to leaf.
+    // Passed entirely between ThreadPool worker queues to avoid stack allocations.
+    // ========================================================================
     template<ValidGameTraits GT>
     struct NodeEvent
     {
@@ -46,7 +52,7 @@ namespace Core
 
         bool isTerminal = false;
         bool collision = false;
-        bool isSelfPlay = false; // Permet de tracker si on active le Sequential Halving
+        bool isSelfPlay = false; // Triggers Sequential Halving if Gumbel is active
 
         explicit NodeEvent(uint32_t maxDepth)
             : path(reserve_only, maxDepth + 1)
@@ -80,6 +86,12 @@ namespace Core
         }
     };
 
+    // ========================================================================
+    // MONTE CARLO TREE SEARCH
+    // Pre-allocates massive, flat contiguous arrays for Node data. 
+    // Designed entirely around Struct-of-Arrays (SoA) layout instead of 
+    // Array-of-Structs (AoS) to maximize cache-line efficiency during traversal.
+    // ========================================================================
     template<ValidGameTraits GT>
     class TreeSearch
     {
@@ -89,6 +101,7 @@ namespace Core
         using Strategy = StrategyPUCT<GT>;
         using EdgeData = typename Strategy::EdgeData;
 
+        // Bitwise flags tracking node lifecycle state safely across threads.
         static constexpr uint8_t FLAG_NONE = 0x00;
         static constexpr uint8_t FLAG_EXPANDING = 0x01;
         static constexpr uint8_t FLAG_EXPANDED = 0x02;
@@ -98,6 +111,7 @@ namespace Core
         const EngineConfig           m_config;
         std::shared_ptr<IEngine<GT>> m_engine;
 
+        // Struct-of-Arrays Storage
         AlignedVec<AtomicVal<uint8_t>>  m_nodeFlags;
         AlignedVec<AtomicVal<uint16_t>> m_nodeNumChildren;
         AlignedVec<AtomicVal<uint32_t>> m_nodeFirstChild;
@@ -116,7 +130,7 @@ namespace Core
 
         // --------------------------------------------------------------------
         // GUMBEL SEQUENTIAL HALVING METADATA
-        // Seulement nécessaire pour la racine, alloué une seule fois
+        // Required strictly at the root. Allocated once to bypass runtime overhead.
         // --------------------------------------------------------------------
         std::array<uint32_t, Defs::kMaxValidActions> m_rootActiveChildren{};
         std::atomic<uint32_t> m_rootActiveCount{ 0 };
@@ -161,7 +175,6 @@ namespace Core
         void applyRootExploration(uint32_t nodeIdx) {
             if (m_config.gumbelK == 0) return;
 
-            // FIX 1 : Vérifier la présence d'enfants AVANT d'altérer les flags atomiques
             uint32_t nChildren = m_nodeNumChildren[nodeIdx].val.load(std::memory_order_relaxed);
             if (nChildren == 0) return;
 
@@ -176,7 +189,6 @@ namespace Core
 
             m_rootActiveCount.store(activeCount, std::memory_order_release);
 
-            // Setup phases for Sequential Halving
             if (activeCount > 1) {
                 uint32_t phases = 0;
                 uint32_t temp = activeCount;
@@ -242,7 +254,6 @@ namespace Core
         }
 
         bool gather(Event& ctx) {
-            // NOTE: ctx.isSelfPlay est préservé ou mis à jour par le ThreadPool
             bool sp = ctx.isSelfPlay;
             ctx.reset();
             ctx.isSelfPlay = sp;
@@ -254,7 +265,7 @@ namespace Core
             ctx.path.push_back(currIdx);
             uint32_t depth = 0;
 
-            // OPTIMISATION : Plus de copie lourde, on charge l'historique initial une seule fois.
+            // Direct buffer clone bypassing individual push_back operations
             ctx.fullHashBuffer.insert(ctx.fullHashBuffer.end(), m_realHashHistory.begin(), m_realHashHistory.end());
 
             while (true) {
@@ -270,8 +281,8 @@ namespace Core
                     return false;
                 }
 
+                // If node is not expanded, attempt to lock it for expansion
                 if (!(flags & FLAG_EXPANDED)) {
-                    // On vérifie si quelqu'un d'autre est DÉJÀ en train d'étendre
                     if (flags & FLAG_EXPANDING) {
                         ctx.collision = true;
                         ctx.isTerminal = true;
@@ -280,9 +291,9 @@ namespace Core
                         return false;
                     }
 
-                    // On s'attend à ce que les flags soient tels qu'on les a lus
                     uint8_t expected = flags;
 
+                    // Atomic Compare-And-Swap. Ensures only one thread generates valid actions.
                     if (m_nodeFlags[currIdx].val.compare_exchange_strong(expected, FLAG_EXPANDING, std::memory_order_acquire)) {
                         ctx.leafNodeIdx = currIdx;
 
@@ -321,7 +332,9 @@ namespace Core
                 float    bestScore = -std::numeric_limits<float>::max();
 
                 // ----------------------------------------------------------------
-                // SEQUENTIAL HALVING LOGIC (SelfPlay seulement, thread-safe)
+                // SEQUENTIAL HALVING 
+                // Drops the lowest performing half of the root actions at specific 
+                // simulation intervals to concentrate processing power on valid moves.
                 // ----------------------------------------------------------------
                 if (currIdx == m_rootIdx && ctx.isSelfPlay && m_config.gumbelK > 0)
                 {
@@ -372,10 +385,10 @@ namespace Core
                     }
                 }
 
+                // Inject Virtual Loss immediately as we descend to discourage other threads.
                 Strategy::applyVirtualLoss(m_nodeEdges[bestChild], m_config.virtualLoss);
                 m_engine->applyAction(m_nodeAction[bestChild], currState);
 
-                // OPTIMISATION : On push en O(1) au lieu de tout recopier
                 ctx.pathHashes.push_back(currState.hash());
                 ctx.fullHashBuffer.push_back(currState.hash());
                 ctx.pathActions.push_back(m_nodeAction[bestChild]);
@@ -443,6 +456,7 @@ namespace Core
                 }
             }
 
+            // Ascend the path, reversing Virtual Losses and applying true outcome values
             for (int i = static_cast<int>(ctx.path.size()) - 1; i >= 1; --i) {
                 const uint32_t nodeIdx = ctx.path[i];
                 const uint32_t playerWhoMoved = ctx.pathActions[i - 1].ownerId();
@@ -462,6 +476,8 @@ namespace Core
             m_realHashHistory.push_back(newState.hash());
 
             bool reused = false;
+            // Evaluates if the current tree can be shifted to the new state instead of 
+            // wiping all prior computation data, heavily improving inference speeds.
             if (m_config.reuseTree && m_rootIdx != UINT32_MAX &&
                 m_nodeCount.load(std::memory_order_relaxed) < (m_config.maxNodes * m_config.memoryThreshold))
             {
@@ -504,6 +520,7 @@ namespace Core
                 sum += w;
             }
 
+            // Greedy evaluation bypasses random generation overheads entirely
             if (temperature < 1e-3f) {
                 uint32_t best = 0;
                 for (uint32_t i = 1; i < num; ++i)

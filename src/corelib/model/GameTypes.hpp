@@ -13,48 +13,18 @@
 
 #include "../util/AlignedVec.hpp"
 
-// ============================================================================
-// GameTypes.hpp — Core Data Model for the OneMindArmy Framework
-//
-// This file defines the fundamental building blocks shared by every game
-// implementation within the framework:
-//
-//   BitsetT<N>   — Unified bitset (primitive or array-backed, auto-selected).
-//                  Serves as the universal spatial representation (Dirac delta 
-//                  for perfect info, probability cloud for imperfect info).
-//   GameDefs<GT> — Derived constants and index types computed from a GameConfig.
-//   Atom<GT>     — Lightweight base entity (index, owner, value, type).
-//   Fact<GT>     — Board element or metadata slot (extends Atom with BitsetT).
-//   Action<GT>   — A game move (extends Atom with source + destination).
-//   State<GT>    — Full game state (arrays of Facts, element + meta sections).
-//
-// To implement a new game, define a plain struct ("GameConfig") satisfying
-// the ValidGameTraits concept and provide the required Engine / Requester /
-// Renderer / Handler type aliases.
-//
-// The macro USING_GAME_TYPES(GT) injects all derived aliases into any class
-// that needs them, keeping local code concise and consistent.
-// ============================================================================
-
 namespace Core
 {
     // ========================================================================
     // VALID GAME TRAITS CONCEPT
-    //
-    // Any struct passed as the GT template parameter must satisfy this concept.
-    // It acts as a compile-time contract.
-    //
-    // Required interface (all static constexpr):
-    //   uint32_t kNumElemTypes      — total physical element types
-    //   uint32_t kNumMetaTypes      — number of auxiliary metadata types
-    //   uint32_t kMaxElems          — maximum physical elements on board
-    //   uint32_t kMaxMetas          — maximum metadata slots
-    //   uint32_t kNumPlayers        — number of competing agents (>= 1)
-    //   uint32_t kNumPos            — number of distinct board positions
-    //   uint32_t kMaxValidActions   — upper bound on legal moves per turn
-    //   uint32_t kActionSpace       — flat policy head output dimension
+    // Compile-time structural contract. 
+    // 
+    // Design Intent:
+    // By enforcing these bounds at compile-time, the framework guarantees 
+    // zero dynamic memory allocation (no heap fragmentation) during the hot loop 
+    // of MCTS tree traversal. It also ensures the C++ memory layout aligns 
+    // perfectly with the Python ONNX neural network architecture.
     // ========================================================================
-
     template<typename GT>
     concept ValidGameTraits =
         requires
@@ -76,17 +46,15 @@ namespace Core
         && (GT::kMaxValidActions > 0)
         && (GT::kActionSpace > 0);
 
-    // ========================================================================
-    // FORWARD DECLARATION (Required for FactMutator)
-    // ========================================================================
     template<ValidGameTraits GT> class GenericZobrist;
     template<ValidGameTraits GT> class PovUtils;
 
     // ========================================================================
-    // UTILITY — Minimal unsigned integer type selection
-    // Automatically picks the smallest uint type that can hold [0, maxValue].
+    // MEMORY OPTIMIZATION TRAIT
+    // Squeezes entity identifiers down to the absolute minimum byte size required.
+    // Drastically reduces the memory footprint of MCTS nodes, improving cache 
+    // locality during massive parallel searches.
     // ========================================================================
-
     template<size_t MaxValue>
     struct SelectMinimalUInt
     {
@@ -101,12 +69,14 @@ namespace Core
 
 
     // ========================================================================
-    // BITSET — Unified bitset with transparent storage selection
-    //
-    // For N <= 64  : backed by a single primitive uint (8 / 16 / 32 / 64 bit).
-    // For N >  64  : backed by a std::array<uint64_t, ceil(N/64)>.
+    // ADAPTIVE SPATIAL BITSET
+    // Universal representation of board geometry. 
+    // 
+    // Design Intent:
+    // Seamlessly defaults to raw hardware primitives (uint8/16/32/64) for small 
+    // boards to maximize performance, but safely degrades to std::array for 
+    // arbitrarily large state spaces.
     // ========================================================================
-
     template<size_t NumBits>
     struct BitsetProps
     {
@@ -128,17 +98,13 @@ namespace Core
         using Props = BitsetProps<NumBits>;
         using Storage = typename Props::StorageType;
 
-        Storage bits{};  // Zero-initialised by default
-
-        // --- Bulk operations ---
+        Storage bits{};
 
         constexpr void clear() noexcept
         {
             if constexpr (Props::IsPrimitive) bits = 0;
             else                              bits.fill(0);
         }
-
-        // --- Single-bit operations ---
 
         constexpr void set(size_t pos) noexcept
         {
@@ -161,8 +127,6 @@ namespace Core
             else                              return (bits[pos / 64] & (1ULL << (pos % 64))) != 0;
         }
 
-        // --- Range operations [start, end] inclusive ---
-
         constexpr void setRange(size_t start, size_t end) noexcept
         {
             for (size_t i = start; i <= end; ++i) set(i);
@@ -172,8 +136,6 @@ namespace Core
         {
             for (size_t i = start; i <= end; ++i) unset(i);
         }
-
-        // --- Introspection ---
 
         [[nodiscard]] constexpr int popcount() const noexcept
         {
@@ -186,7 +148,8 @@ namespace Core
             }
         }
 
-        // Returns the index of the single set bit, or -1 if zero or multiple bits are set.
+        // Resolves superposition. Returns -1 if the bitset represents a probability 
+        // cloud (multiple bits set) or is completely empty.
         [[nodiscard]] constexpr int singleBitIndex() const noexcept
         {
             if constexpr (Props::IsPrimitive)
@@ -209,12 +172,10 @@ namespace Core
     };
 
     // ========================================================================
-    // GAME DEFS — Derived constants and index types
-    //
-    // GameDefs<GT> is the single source of truth for everything computed from
-    // a game config. Import it once via USING_GAME_TYPES(GT).
+    // COMPILE-TIME CONSTANT REGISTRY
+    // Centralizes all derived logic constraints. Prevents magic numbers 
+    // from proliferating through the engine and tensor encoding logic.
     // ========================================================================
-
     template<ValidGameTraits GT>
     struct GameDefs
     {
@@ -237,20 +198,15 @@ namespace Core
 
         static constexpr uint32_t kActionSpace = GT::kActionSpace;
 
-        // ====================================================================
-        // SENTINEL VALUES (One-past-the-end indices)
-        // Used to denote dead, unowned, or off-board entities.
-        // ====================================================================
+        // Sentinel bounds indicating inactive or unowned states.
         static constexpr uint32_t kPadFact = kNumFactTypes;
         static constexpr uint32_t kNoOwner = kNumPlayers;
         static constexpr uint32_t kNoPos = kNumPos;
 
-        // ====================================================================
-        // COMPACT INDEX TYPES
-        // ====================================================================
+        // Tightly packed ID capacities (Includes +1 padding for sentinels)
         static constexpr uint32_t kFactCapacity = kNumFactTypes + 1;
         static constexpr uint32_t kOwnerCapacity = kNumPlayers + 1;
-        static constexpr uint32_t kPosCapacity = kNumPos + 1; // +1 to support kNoPos sentinels
+        static constexpr uint32_t kPosCapacity = kNumPos + 1;
 
         using FId = SelectMinimalUIntT<kFactCapacity>;
         using OId = SelectMinimalUIntT<kOwnerCapacity>;
@@ -258,22 +214,19 @@ namespace Core
 
         enum class FactType : uint8_t
         {
-            ELEMENT = 0,    // Physical board element (piece, card, token, …)
-            META = 1,       // Auxiliary game rule / score slot (turn, castling, …)
-            ACTION = 2,     // A legal move (used in Action arrays)
-            PAD = 3         // Empty / unused slot
+            ELEMENT = 0,    // Physical board pieces/cards
+            META = 1,       // Auxiliary game rules (turn counters, castling rights)
+            ACTION = 2,     // Graph edge representing a state transition
+            PAD = 3         // Null token for transformer padding
         };
 
-        // ====================================================================
-        // LOCATION STORAGE (Universal Spatial Representation)
-        // ====================================================================
         using LocType = BitsetT<kNumPos>;
     };
 
     // ========================================================================
-    // ATOM — Base entity
+    // BASE ENTITY
+    // Common data carrier for all semantic objects in the framework.
     // ========================================================================
-
     template<ValidGameTraits GT>
     class Atom
     {
@@ -295,18 +248,14 @@ namespace Core
         [[nodiscard]] constexpr float    value()   const noexcept { return m_value; }
         [[nodiscard]] constexpr FactType type()    const noexcept { return m_type; }
 
-        // Returns true when the atom carries a meaningful value (not dead / empty).
         [[nodiscard]] constexpr bool exists() const noexcept { return m_value > 1e-5f; }
     };
 
     // ========================================================================
-    // FACT — Board element or metadata slot
-    //
-    // A Fact represents a trackable entity on the board or an auxiliary metadata slot.
-    // Its location is always stored as a BitsetT, bridging the gap between 
-    // perfect information (Dirac delta) and imperfect information (probability cloud).
+    // PERSISTENT BOARD ENTITY
+    // Maintains spatial state (using BitsetT to support probability clouds 
+    // in imperfect-information environments).
     // ========================================================================
-
     template<ValidGameTraits GT>
     class Fact : public Atom<GT>
     {
@@ -319,12 +268,11 @@ namespace Core
         using FactType = typename Defs::FactType;
 
     private:
-        LocType m_location{};   // Universal spatial mask
+        LocType m_location{};
 
     public:
         constexpr Fact() noexcept { m_location.clear(); }
 
-        // --- Lifecycle ---
         void initType(FactType t) noexcept { this->m_type = t; }
 
         void reset() noexcept
@@ -359,17 +307,13 @@ namespace Core
             this->m_value = val;
         }
 
-        // --- Identity Modifiers ---
         void setFactId(uint32_t id) noexcept { this->m_factId = static_cast<FId>(id); }
         void setOwner(uint32_t oId) noexcept { this->m_ownerId = static_cast<OId>(oId); }
 
-        // --- Value Modifiers ---
         void setValue(float val) noexcept { this->m_value = val; }
         void addValue(float delta) noexcept { this->m_value += delta; }
 
-        // --- Spatial Modifiers ---
-
-        // Sets the entity to exactly one position (Perfect Info Dirac).
+        // Dirac delta location assignment (Perfect info)
         void setPos(uint32_t loc) noexcept
         {
             assert(loc < Defs::kNumPos);
@@ -378,7 +322,7 @@ namespace Core
             m_location.set(loc);
         }
 
-        // Adds a possible location to the belief state (Imperfect Info).
+        // Probability cloud expansion (Imperfect info)
         void addPossiblePos(uint32_t loc) noexcept
         {
             assert(loc < Defs::kNumPos);
@@ -386,24 +330,20 @@ namespace Core
             m_location.set(loc);
         }
 
-        // Removes a possible location.
         void removePossiblePos(uint32_t loc) noexcept
         {
             assert(loc < Defs::kNumPos);
             m_location.unset(loc);
         }
 
-        // Kills the entity entirely, clearing its spatial presence and semantic value.
+        // Zeroes all spatial and semantic markers, rendering it a ghost token.
         void kill() noexcept
         {
             this->m_value = 0.0f;
             m_location.clear();
         }
 
-        // --- Spatial Queries ---
-
-        // Returns the position if the entity is collapsed to a single square,
-        // or Defs::kNoPos if the entity is dead or in superposition.
+        // Collapses the state vector if deterministic, returns kNoPos otherwise.
         [[nodiscard]] uint32_t pos() const noexcept
         {
             if (!this->exists()) return Defs::kNoPos;
@@ -419,7 +359,6 @@ namespace Core
 
         [[nodiscard]] const LocType& rawLocation() const noexcept { return m_location; }
 
-        // --- Data Transfer ---
         void copyFrom(const Fact& other) noexcept
         {
             *this = other;
@@ -427,12 +366,10 @@ namespace Core
     };
 
     // ========================================================================
-    // ACTION — A game move
-    //
-    // Unlike Facts which maintain spatial superposition, Actions represent 
-    // a definite edge traversing the graph, hence they use primitive indices.
+    // STATE TRANSITION EDGE
+    // Represents a defined transition between two states. Unlike Facts, actions 
+    // are deterministic graph edges and only require simple source/dest IDs.
     // ========================================================================
-
     template<ValidGameTraits GT>
     class Action : public Atom<GT>
     {
@@ -478,7 +415,6 @@ namespace Core
             m_dest = static_cast<PId>(dst);
         }
 
-        // --- Accessors ---
         [[nodiscard]] constexpr uint32_t source() const noexcept { return static_cast<uint32_t>(m_source); }
         [[nodiscard]] constexpr uint32_t dest()   const noexcept { return static_cast<uint32_t>(m_dest); }
         [[nodiscard]] constexpr bool     isValid() const noexcept { return this->m_type == FactType::ACTION; }
@@ -493,7 +429,10 @@ namespace Core
     };
 
     // ========================================================================
-    // FACT MUTATOR (Proxy Pattern for Zobrist Synchronisation)
+    // RAII ZOBRIST PROXY
+    // Grants mutable access to a Fact while strictly guaranteeing that the 
+    // underlying State's Zobrist hash stays perfectly synchronized.
+    // XORs the fact out of the hash on creation, and XORs it back on destruction.
     // ========================================================================
     template<ValidGameTraits GT>
     class FactMutator
@@ -521,9 +460,13 @@ namespace Core
     };
 
     // ========================================================================
-    // STATE — Complete game state snapshot
+    // ABSOLUTE GAME STATE
+    // The definitive source of truth for the engine and the neural network.
+    // 
+    // Design Intent:
+    // Maintains a rigidly partitioned memory layout (Elements vs Metas) to 
+    // ensure deterministic, position-anchored encoding for the Transformer model.
     // ========================================================================
-
     template<ValidGameTraits GT>
     class State
     {
@@ -532,13 +475,9 @@ namespace Core
         using FactType = typename Defs::FactType;
 
     private:
-        // By explicitly using Core::Fact<GT>, we avoid the shadowed name resolution warning.
         std::array<Core::Fact<GT>, Defs::kMaxFacts> m_facts;
         uint64_t m_hash = 0;
 
-        // ====================================================================
-        // SECURE SECTOR : Strictly reserved for PovUtils access
-        // ====================================================================
         friend class PovUtils<GT>;
 
         [[nodiscard]] Core::Fact<GT>& modifyFactNoHash(uint32_t factIdx) noexcept
@@ -560,7 +499,6 @@ namespace Core
             for (auto& f : m_facts) f.reset();
         }
 
-        // --- Read-Only Views ---
         [[nodiscard]] constexpr uint64_t hash() const noexcept { return m_hash; }
         [[nodiscard]] std::span<const Core::Fact<GT>> all() const noexcept { return m_facts; }
         [[nodiscard]] std::span<const Core::Fact<GT>> elems() const noexcept { return std::span<const Core::Fact<GT>>{ m_facts }.first(Defs::kMaxElems); }
@@ -584,7 +522,7 @@ namespace Core
             return m_facts[factIdx];
         }
 
-        // --- Mutators ---
+        // Returns a FactMutator proxy to ensure Zobrist synchronization
         [[nodiscard]] FactMutator<GT> modifyElem(uint32_t elemIdx) noexcept
         {
             assert(elemIdx < Defs::kMaxElems);
@@ -603,8 +541,7 @@ namespace Core
             return FactMutator<GT>{m_hash, m_facts[factIdx]};
         }
 
-        // Recomputes the entire Zobrist hash from scratch. Must be called after 
-        // batch initialisation (e.g., FEN parsing) that bypassed FactMutator.
+        // Restores hash synchronization after bulk raw memory operations (e.g., FEN deserialization).
         void recomputeHash() noexcept
         {
             m_hash = 0;
@@ -615,21 +552,27 @@ namespace Core
     };
 
     // ========================================================================
-    // GAME RESULT — Stores scores and the reason for game termination
+    // OUTCOME PAYLOAD
+    // Maintains structural compatibility with TensorRT array outputs while 
+    // carrying engine-specific termination reason codes.
     // ========================================================================
     template<uint32_t NumPlayers>
     struct GameResult
     {
         std::array<float, NumPlayers * 3> wdl{};
-        uint32_t reason = 0; // Game-specific termination code (0 = ongoing/none)
+        uint32_t reason = 0;
 
-        // Maintains compatibility with std::array API used by Event::reset()
         constexpr void fill(float val) noexcept {
             wdl.fill(val);
             reason = 0;
         }
     };
 
+    // ========================================================================
+    // HEAPLESS VECTOR 
+    // Array wrapper that mimics std::vector semantics without dynamic allocation.
+    // Eliminates heap fragmentation during high-throughput MCTS rollouts.
+    // ========================================================================
     template<typename T, size_t Capacity>
     class alignas(64) StaticVec
     {
@@ -689,9 +632,9 @@ namespace Core
 #include "../util/Zobrist.hpp"
 
 // ============================================================================
-// INJECTION MACRO
-// Ensures downstream classes can pull core definitions into their local scope
-// without constant namespace typing.
+// DEPENDENCY INJECTION MACRO
+// Erases heavy template boilerplate across the codebase by flooding the local 
+// scope with perfectly typed aliases mapped to the active GameTraits configuration.
 // ============================================================================
 #define USING_GAME_TYPES(GT)                                                   \
     using Defs          = Core::GameDefs<GT>;                                  \

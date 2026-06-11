@@ -431,7 +431,7 @@ namespace Chess
 		const State& state,
 		std::span<const uint64_t> hashHistory) const
 	{
-		constexpr std::array<float, 6> WDL_DRAW = { 0.0f, 1.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+		constexpr std::array<float, 6> WDL_DRAW = { 0.0f, 1.0f - 0.35f, 0.35f, 0.0f, 1.0f - 0.35f, 0.35f };
 		constexpr std::array<float, 6> WDL_WHITE = { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f };
 		constexpr std::array<float, 6> WDL_BLACK = { 0.0f, 0.0f, 1.0f, 1.0f, 0.0f, 0.0f };
 

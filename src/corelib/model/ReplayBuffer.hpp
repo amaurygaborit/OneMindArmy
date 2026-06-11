@@ -11,6 +11,8 @@
 
 namespace Core
 {
+    // Explicitly forces 1-byte alignment. Guarantees that the C++ struct binary layout 
+    // perfectly matches Python's struct.unpack format, preventing offset corruption.
 #pragma pack(push, 1)
 
     template<ValidGameTraits GT>
@@ -28,6 +30,11 @@ namespace Core
 
 #pragma pack(pop)
 
+    // ========================================================================
+    // REPLAY BUFFER
+    // Accumulates self-play transitions in memory until a terminal state is reached.
+    // Handles perspective rotations and binary serialization.
+    // ========================================================================
     template<ValidGameTraits GT>
     class ReplayBuffer
     {
@@ -36,7 +43,9 @@ namespace Core
 
     private:
         AlignedVec<TrainingSample<GT>> m_samples;
-        AlignedVec<uint32_t>           m_viewers; // Utilisation de AlignedVec pour correspondre à m_samples
+        // Tracks the active player for each sample to retroactively apply the 
+        // correct Win/Draw/Loss outcome from their perspective at the end of the game.
+        AlignedVec<uint32_t>           m_viewers;
 
         static std::mt19937& getRng()
         {
@@ -63,7 +72,7 @@ namespace Core
             const std::array<float, Defs::kNNInputSize>& encodedInput,
             const std::array<float, Defs::kActionSpace>& policy,
             const std::array<bool, Defs::kActionSpace>& legalMaskBool,
-            uint32_t currentPlayer) // NOUVEAU : On trace qui devait jouer
+            uint32_t currentPlayer)
         {
             m_samples.emplace_back();
             m_viewers.push_back(currentPlayer);
@@ -72,6 +81,7 @@ namespace Core
             std::memcpy(sample.nnInput.data(), encodedInput.data(), Defs::kNNInputSize * sizeof(float));
             std::memcpy(sample.policy.data(), policy.data(), Defs::kActionSpace * sizeof(float));
 
+            // Bit-pack the boolean mask to minimize disk footprint.
             std::memset(sample.legalMovesMask.data(), 0, sample.legalMovesMask.size());
             for (size_t i = 0; i < Defs::kActionSpace; ++i) {
                 if (legalMaskBool[i])
@@ -90,12 +100,14 @@ namespace Core
             if (!outFile.good())
                 throw std::runtime_error("ReplayBuffer: output stream is not writable.");
 
-            // 1. Filtrage des parties nulles
+            // 1. Draw Downsampling
+            // Mitigates dataset imbalance in games with high draw rates (e.g., Chess) 
+            // by discarding a percentage of tied games.
             if (drawSampleRate < 1.0f)
             {
                 const bool isDraw = [&]() {
                     for (uint32_t p = 0; p < Defs::kNumPlayers; ++p)
-                        if (finalOutcome.wdl[p * 3 + 0] > 0.5f) return false; // quelqu'un a gagné
+                        if (finalOutcome.wdl[p * 3 + 0] > 0.5f) return false;
                     return true;
                     }();
 
@@ -110,8 +122,9 @@ namespace Core
                 }
             }
 
-            // 2. OPTIMISATION WDL : Précalcul des cibles pour chaque POV possible
-            // precomputedWDL[viewer_id] contiendra l'array WDL exactement tourné pour ce joueur.
+            // 2. WDL Target Pre-computation
+            // Caches the rotated WDL arrays for every possible viewpoint to avoid 
+            // recalculating modulo arithmetic for every single sample.
             std::array<std::array<float, Defs::kNumPlayers * 3>, Defs::kNumPlayers> precomputedWDL{};
 
             for (uint32_t viewer = 0; viewer < Defs::kNumPlayers; ++viewer)
@@ -125,14 +138,14 @@ namespace Core
                 }
             }
 
-            // 3. Application vectorisée (plus besoin de modulos, juste une copie mémoire)
+            // 3. Target Application 
             for (size_t i = 0; i < m_samples.size(); ++i) {
                 m_samples[i].wdlTarget = precomputedWDL[m_viewers[i]];
             }
 
-            // Draw score adjustment : remap draw outcomes
-            // drawScore=0.0 → aucun effet
-            // drawScore=0.5 → nulle encodée comme 50% défaite
+            // 4. Draw Score Adjustment
+            // Transfers probability mass from the Draw channel to the Loss channel.
+            // Encourages aggressive, decisive play by penalizing draws.
             if (drawScore > 1e-6f)
             {
                 for (size_t i = 0; i < m_samples.size(); ++i)
@@ -144,8 +157,6 @@ namespace Core
                         float& d = wdl[p * 3 + 1];
                         float& l = wdl[p * 3 + 2];
 
-                        // Transfère une fraction du D vers L
-                        // Draw → [W, D*(1-s), L + D*s]
                         float transfer = d * drawScore;
                         d -= transfer;
                         l += transfer;
@@ -153,7 +164,7 @@ namespace Core
                 }
             }
 
-            // 4. Dump binaire brut
+            // 5. Binary Dump
             outFile.write(
                 reinterpret_cast<const char*>(m_samples.data()),
                 static_cast<std::streamsize>(m_samples.size() * sizeof(TrainingSample<GT>)));

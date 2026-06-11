@@ -15,7 +15,16 @@
 
 namespace Core
 {
-    // Aligned allocator
+    // ========================================================================
+    // ALIGNED ALLOCATOR
+    // Overrides standard allocator routines to enforce strict memory alignment 
+    // (default 64-byte / Cache Line). 
+    //
+    // Design Intent:
+    // Prevents false sharing across threads in the ThreadPool and perfectly 
+    // aligns continuous arrays (like tensors) for zero-copy DMA transfers 
+    // over the PCIe bus to the GPU.
+    // ========================================================================
     template <typename T, size_t Alignment = 64>
     struct AlignedAllocator
     {
@@ -64,10 +73,15 @@ namespace Core
         bool operator!=(const AlignedAllocator&) const noexcept { return false; }
     };
 
-    // reserve-only tag
+    // Tag dispatch for optimized constructor pathways
     struct reserve_only_tag { explicit constexpr reserve_only_tag() noexcept = default; };
     inline constexpr reserve_only_tag reserve_only{};
 
+    // ========================================================================
+    // ALIGNED VECTOR
+    // A drop-in replacement for std::vector that guarantees underlying 
+    // buffer alignment and provides performance-focused extensions.
+    // ========================================================================
     template <typename T, size_t Alignment = 64>
     class AlignedVec : public std::vector<T, AlignedAllocator<T, Alignment>>
     {
@@ -79,42 +93,36 @@ namespace Core
         using typename base_t::iterator;
         using typename base_t::const_iterator;
 
-        // inherit base constructors
         using base_t::base_t;
 
-        // default ctor
         AlignedVec() noexcept = default;
 
-        // reserve-only (creates empty vector)
+        // Bypasses the default O(N) zero-initialization of std::vector when 
+        // allocating large pre-sized buffers (like MCTS node arrays).
         AlignedVec(reserve_only_tag, size_type reserve_capacity)
         {
             this->reserve(reserve_capacity);
         }
 
-        // reserve-only + pre-size + value initialization
         AlignedVec(reserve_only_tag, size_type reserve_capacity, size_type initial_size, const value_type& value = value_type())
         {
             this->reserve(reserve_capacity);
-            this->assign(initial_size, value); // now size() == initial_size
+            this->assign(initial_size, value);
         }
 
-        // copy/move defaulted
         AlignedVec(const AlignedVec&) = default;
         AlignedVec(AlignedVec&&) noexcept = default;
         AlignedVec& operator=(const AlignedVec&) = default;
         AlignedVec& operator=(AlignedVec&&) noexcept = default;
-
-        // destructor defaulted
         ~AlignedVec() noexcept = default;
 
-        // returns the last element by value
         value_type pop_back_value()
         {
             assert(!this->empty() && "pop_back_value() called on empty vector");
 
+            // Avoids costly move constructors for trivial POD types
             if constexpr (std::is_trivially_copyable_v<value_type> && std::is_trivially_default_constructible_v<value_type>)
             {
-                // for trivial types, copy is cheap and zeroing semantics are well defined for POD-like types
                 value_type tmp = this->back();
                 this->pop_back();
                 return tmp;
@@ -127,7 +135,8 @@ namespace Core
             }
         }
 
-        // reset elements to zero/default without changing size
+        // Hardware-accelerated buffer wipe. Much faster than loop assignment 
+        // or calling .clear() + .resize() for recyclable arrays.
         void reset()
         {
             if (this->size() == 0) return;

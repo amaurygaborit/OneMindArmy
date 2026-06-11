@@ -3,61 +3,60 @@
 # Game: Chess | Mode: Human vs AI / AI vs AI Match
 # ==============================================================================
 
-name: chess
+name: chess                          # Target environment identifier
 
 engine:
-  numSimulations: 200
-  maxDepth: 128
-
-  cPUCT: 1.5
-  fpuValue: 0.0            # Assume unknown moves are neutral instead of bad
-  virtualLoss: 2.0         # Lower penalty needed for single game
-  temperatureDropTurn: 30
-
-  gumbelK: 0
-  gumbelCVisit: 50.0
-  gumbelCScale: 0.0
-
-  maxNodes: 50000           # Allow the tree to grow huge for one game
-  memoryThreshold: 0.8
-  reuseTree: true         # Reuse tree between turns to think on opponent's time
-
-  resignThreshold: -0.95
-  resignMinPly: 200
+  numSimulations: 3000               # High rollout count to ensure deep tactical evaluation
+  maxDepth: 128                      # Hard limit on tree depth to prevent memory overflow in infinite loops
+  
+  cPUCT: 1.5                         # Balances exploration of new moves vs exploitation of known good moves
+  fpuValue: 0.0                      # First Play Urgency: treats unknown nodes as neutral to encourage exploration
+  virtualLoss: 2.0                   # Penalizes threads evaluating the same node to force diverse tree traversal
+  temperatureDropTurn: 0             # Disables exploration entirely to ensure strict competitive play from turn 1
+  
+  gumbelK: 0                         # Disables Gumbel MuZero sampling for standard AlphaZero MCTS play
+  gumbelCVisit: 50.0                 # Visit count scaling constant (inactive when gumbelK=0)
+  gumbelCScale: 0.0                  # Logit scaling factor (inactive when gumbelK=0)
+  
+  maxNodes: 1000000                  # Massive memory allocation to allow deep thinking for a single game
+  memoryThreshold: 0.9               # Utilization threshold before triggering tree pruning/garbage collection
+  reuseTree: true                    # Retains tree search data to allow the AI to think during the opponent's turn
+  
+  resignThreshold: -0.95             # Extreme value estimate drop required to trigger early resignation
+  resignMinPly: 200                  # Forces the game to continue for at least 200 plies before resignation is allowed
 
 backend:
-  numGPUs: auto
-
-  inferenceBatchSize: 256         # Small batch size for instant TensorRT response
-  numParallelGames: 1
-
-  precision: "fp16"
-
-  numSearchThreads: 4             # Blast all CPU cores on this single game
-  numBackpropThreads: 2
-  numInferenceThreads: 1
-
-  queueScale: 4.0
-  fastDrain: true
+  numGPUs: auto                      # Automatically distributes inference across all available hardware
+  
+  inferenceBatchSize: 256            # Small batch size to minimize latency for instant interactive response
+  numParallelGames: 1                # Dedicated single game focus for standard match play
+  
+  precision: "fp16"                  # Half-precision to leverage TensorRT core speedups without quality loss
+  
+  numSearchThreads: 4                # Saturates CPU cores on tree traversal for this single instance
+  numBackpropThreads: 2              # Dedicated threads to update tree statistics post-simulation without blocking
+  numInferenceThreads: 1             # Single thread is sufficient to push states to the GPU for one game
+  
+  queueScale: 4.0                    # Buffer multiplier to handle sudden bursts of inference requests
+  fastDrain: true                    # Prioritizes emptying the GPU queue immediately to avoid latency spikes
 
 session:
-  numAIs: 2                # 1 = Human vs AI
-  autoInitialState: true
-  maxTimePerMove: 5.0      # AI has 5 seconds max to think
-  temperature: 0.01        # Strict competitive play
-  verbose: true
+  numAIs: 2                          # Determines match type (1 = Human vs AI, 2 = AI vs AI)
+  autoInitialState: true             # Skips manual board setup to start directly from the standard chess position
+  maxTimePerMove: 5.0                # Strict time boundary to prevent the AI from hanging indefinitely
+  temperature: 0.01                  # Near-zero value ensures deterministic selection of the strongest evaluated move
+  verbose: true                      # Enables detailed stdout logs to track engine decision metrics and confidence
+  
+  renderState: true                  # Visualizes the board state in the terminal
+  renderValidActions: false          # Hides legal moves list to keep the terminal output clean
+  renderActionPlayed: true           # Explicitly prints the chosen move for match tracking
+  renderResult: true                 # Displays the final match outcome (Win/Loss/Draw)
 
-  renderState: true
-  renderValidActions: false
-  renderActionPlayed: true
-  renderResult: true
-
-# --- 6. GAME SPECIFIC (Full UI) ---
 specific:
-  maxPly: 512
-  randomOpeningPlies: 0
-
-  whiteAtBottom: true
-  showCoordinates: true
-  replaceRendering: false
-  renderRawState: false
+  maxPly: 512                        # Absolute turn limit to forcefully terminate endless looping endgames
+  randomOpeningPlies: 8              # Injects early randomness to prevent repetitive standard opening book lines
+  
+  whiteAtBottom: true                # Orients the terminal UI to match standard human perspective
+  showCoordinates: true              # Adds algebraic notation grids (A-H, 1-8) around the board rendering
+  replaceRendering: false            # Prints new boards on new lines instead of overwriting to keep match history
+  renderRawState: false              # Hides the internal bitboard/tensor array representation from the UI

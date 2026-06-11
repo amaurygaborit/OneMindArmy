@@ -4,39 +4,17 @@
 #include "../interfaces/IRenderer.hpp"
 #include "../model/ThreadPool.hpp"
 
-// ============================================================================
-// IHandler.hpp — Session Orchestration Interface
-//
-// IHandler is the top-level controller for a single game session. It owns all
-// runtime components (engine, tree searches, thread pool, requester, renderer)
-// and drives the match loop via execute().
-//
-// Concrete implementations:
-//   InferenceHandler<GT>  — AI vs AI or AI vs Human (MCTS-PUCT / CFR-AVG).
-//   UCIHandler<GT>        — Exposes the engine over the UCI protocol.
-//   TrainingHandler<GT>   — Self-play loop that emits training samples.
-//
-// DEPENDENCY INJECTION
-// ====================
-// Instead of a telescoping 7-parameter setup() call, all runtime dependencies
-// are bundled into a HandlerDeps<GT> struct. This makes call sites readable,
-// allows partial construction, and simplifies unit testing (just fill the
-// fields you need for the test).
-//
-// LIFETIME MODEL
-// ==============
-//   — m_engine is shared (const, read-only after setup) — multiple handlers
-//     or tree-search threads can reference it safely.
-//   — m_treeSearch, m_threadPool, m_requester, m_renderer are exclusively
-//     owned by the handler (unique_ptr / Vec<unique_ptr>).
-// ============================================================================
-
 namespace Core
 {
-    // ========================================================================
-    // IHandler<GT>
-    // ========================================================================
-
+    // ============================================================================
+    // SESSION ORCHESTRATOR INTERFACE
+    // Drives the main execution loop (Self-Play, Match, or Protocol binding).
+    //
+    // Architecture:
+    // Utilizes strict Dependency Injection via setup(). The handler takes ownership 
+    // of all runtime components (Thread pools, UI) while keeping a shared reference 
+    // to the stateless Engine.
+    // ============================================================================
     template<ValidGameTraits GT>
     class IHandler
     {
@@ -52,31 +30,18 @@ namespace Core
         SessionConfig<GT>                    m_sessionCfg;
         EngineConfig                         m_engineCfg;
 
-        // Override to read handler-specific YAML fields (e.g. numSimulations,
-        // temperature schedule, draw detection horizon…).
+        // Hook to load pipeline-specific configurations (e.g., export paths).
         virtual void specificSetup(const YAML::Node& config) = 0;
 
-        // -------------------------------------------------------------------
-        // PROTECTED HELPERS — Convenience methods for concrete handlers.
-        // -------------------------------------------------------------------
-
-        /// Returns true if a human-controlled requester is attached.
+        // Safely checks if human/external interactions are enabled in this pipeline.
         [[nodiscard]] bool hasRequester() const noexcept { return m_requester != nullptr; }
-
-        /// Returns true if a renderer is attached (non-headless mode).
         [[nodiscard]] bool hasRenderer()  const noexcept { return m_renderer != nullptr; }
 
     public:
         virtual ~IHandler() = default;
 
-        // -------------------------------------------------------------------
-        // SETUP
-        //
-        // Acquires all dependencies and calls the game-specific hook.
-        // The YAML node provides runtime configuration (time control,
-        // temperature, rendering flags…).
-        // -------------------------------------------------------------------
-
+        // Injects all initialized dependencies to decouple component creation 
+        // from the execution logic.
         void setup(const YAML::Node& config,
             std::shared_ptr<IEngine<GT>> engine,
             AlignedVec<std::unique_ptr<TreeSearch<GT>>>&& treeSearch,
@@ -98,13 +63,7 @@ namespace Core
             specificSetup(config);
         }
 
-        // -------------------------------------------------------------------
-        // EXECUTE — Runs the full session (match, self-play loop, UCI loop…).
-        //
-        // Blocks until the session is complete. Thread-safety is the
-        // responsibility of the concrete implementation.
-        // -------------------------------------------------------------------
-
+        // Blocking call that executes the target pipeline until termination.
         virtual void execute() = 0;
     };
 }

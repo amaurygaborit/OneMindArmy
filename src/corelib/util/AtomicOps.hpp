@@ -20,7 +20,13 @@
 
 namespace AtomicOps
 {
-    // Load operations
+    // ========================================================================
+    // HARDWARE ATOMICS WRAPPER
+    // Bypasses the overhead of std::atomic abstractions by explicitly dispatching
+    // directly to compiler intrinsics. Ensures maximum throughput during 
+    // concurrent MCTS edge updates.
+    // ========================================================================
+
     template<typename T>
     inline T load(const T* ptr, std::memory_order order = std::memory_order_acquire)
     {
@@ -50,7 +56,6 @@ namespace AtomicOps
 #endif
     }
 
-    // Store operations
     template<typename T>
     inline void store(T* ptr, T value, std::memory_order order = std::memory_order_release)
     {
@@ -76,7 +81,6 @@ namespace AtomicOps
 #endif
     }
 
-    // Fetch-add operations
     template<typename T>
     inline T fetch_add(T* ptr, T value, std::memory_order order = std::memory_order_acq_rel)
     {
@@ -106,7 +110,6 @@ namespace AtomicOps
 #endif
     }
 
-    // Compare-exchange operations
     template<typename T>
     inline bool compare_exchange(T* ptr, T* expected, T desired,
         std::memory_order success = std::memory_order_acq_rel,
@@ -159,7 +162,11 @@ namespace AtomicOps
 #endif
     }
 
-    // Float specializations using memcpy for type-punning
+    // ========================================================================
+    // FLOATING-POINT ATOMICS
+    // Native atomics rarely support floats natively. Uses fast type-punning 
+    // via memcpy to execute bitwise integer atomics on floating-point data.
+    // ========================================================================
     inline float load(const float* ptr, std::memory_order order = std::memory_order_acquire)
     {
         uint32_t temp;

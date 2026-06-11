@@ -36,16 +36,10 @@ namespace Core
     inline static TRTLogger g_logger;
 
     // ========================================================================
-    // MODEL RESULTS
-    //
-    // values : kNumPlayers * 3 WDL probabilities per player
-    //   [p*3+0] = P(Win), [p*3+1] = P(Draw), [p*3+2] = P(Loss)
-    //
-    // This matches GameResult::wdl and NodeEvent::nnWDL exactly.
-    // All three are std::array<float, kNumPlayers * 3>.
-    //
-    // NOTE: GameResult is a STRUCT { wdl: array<float,kNumPlayers*3>; reason: uint32_t }.
-    //       ModelResultsT only holds the float payload — no reason field needed.
+    // MODEL RESULTS 
+    // 
+    // Values: Stores exactly 3 probabilities (Win, Draw, Loss) per player.
+    // Maps identically to the GameResult::wdl schema.
     // ========================================================================
     template<ValidGameTraits GT>
     struct ModelResultsT
@@ -53,13 +47,18 @@ namespace Core
         USING_GAME_TYPES(GT);
 
         std::array<float, Defs::kNumPlayers * 3> values{};  // WDL per player
-        std::array<float, Defs::kActionSpace>    policy{};  // post-softmax
+        std::array<float, Defs::kActionSpace>    policy{};  // Post-softmax probabilities
 
         ModelResultsT() noexcept = default;
     };
 
     // ========================================================================
-    // NEURAL NET (TensorRT Asynchronous GPU Wrapper)
+    // TENSORRT WRAPPER 
+    // High-throughput, asynchronous GPU inference engine.
+    // 
+    // Design Intent:
+    // Leverages CUDA Streams and Pinned Memory (cudaMallocHost) to execute 
+    // Direct Memory Access (DMA) transfers without blocking the CPU thread.
     // ========================================================================
     template<ValidGameTraits GT>
     class NeuralNet
@@ -68,7 +67,6 @@ namespace Core
         USING_GAME_TYPES(GT);
         using ModelResults = ModelResultsT<GT>;
 
-        // Floats in the value output per sample = kNumPlayers * 3
         static constexpr uint32_t kValueOutSize = Defs::kNumPlayers * 3;
 
         int      m_deviceId;
@@ -79,13 +77,13 @@ namespace Core
         nvinfer1::ICudaEngine* m_engine = nullptr;
         nvinfer1::IExecutionContext* m_context = nullptr;
 
-        float* d_input = nullptr;  // GPU: NN input
-        float* d_values = nullptr;  // GPU: WDL output (kNumPlayers * 3 per sample)
-        float* d_policy = nullptr;  // GPU: policy output
+        float* d_input = nullptr;  // Device VRAM: NN input
+        float* d_values = nullptr; // Device VRAM: WDL output 
+        float* d_policy = nullptr; // Device VRAM: Policy output
 
-        float* h_input = nullptr;  // pinned CPU: NN input
-        float* h_values = nullptr;  // pinned CPU: WDL output
-        float* h_policy = nullptr;  // pinned CPU: policy output
+        float* h_input = nullptr;  // Pinned RAM: NN input
+        float* h_values = nullptr; // Pinned RAM: WDL output
+        float* h_policy = nullptr; // Pinned RAM: Policy output
 
         void loadEngine(const std::string& path)
         {
@@ -126,17 +124,17 @@ namespace Core
 
                 const uint32_t B = inferenceBatchSize;
 
-                // GPU buffers
+                // Allocate VRAM
                 CUDA_CHECK(cudaMalloc(&d_input, B * Defs::kNNInputSize * sizeof(float)));
                 CUDA_CHECK(cudaMalloc(&d_values, B * kValueOutSize * sizeof(float)));
                 CUDA_CHECK(cudaMalloc(&d_policy, B * Defs::kActionSpace * sizeof(float)));
 
-                // Pinned CPU buffers (direct DMA, no paging)
+                // Allocate Paged-Locked Host Memory (Prevents OS swapping, allows async DMA)
                 CUDA_CHECK(cudaMallocHost(&h_input, B * Defs::kNNInputSize * sizeof(float)));
                 CUDA_CHECK(cudaMallocHost(&h_values, B * kValueOutSize * sizeof(float)));
                 CUDA_CHECK(cudaMallocHost(&h_policy, B * Defs::kActionSpace * sizeof(float)));
 
-                // Tensor name bindings — must match the ONNX export in train.py
+                // Map I/O tensors (Names MUST match the python ONNX exporter)
                 m_context->setTensorAddress("input_state", d_input);
                 m_context->setTensorAddress("value_output", d_values);
                 m_context->setTensorAddress("policy_output", d_policy);
@@ -165,7 +163,7 @@ namespace Core
         NeuralNet& operator=(const NeuralNet&) = delete;
 
         // ----------------------------------------------------------------
-        // BATCH INFERENCE
+        // BATCH INFERENCE PIPELINE
         // ----------------------------------------------------------------
         void forwardBatch(
             const AlignedVec<const std::array<float, Defs::kNNInputSize>*>& batchPtrs,
@@ -179,11 +177,12 @@ namespace Core
 
             CUDA_CHECK(cudaSetDevice(m_deviceId));
 
+            // Dynamically adjust execution context for the current batch size
             m_context->setInputShape(
                 "input_state",
                 nvinfer1::Dims2{ batchSize, static_cast<int32_t>(Defs::kNNInputSize) });
 
-            // === OPTIMISATION : Copie directe depuis le MCTS vers la mémoire Pinned ===
+            // OPTIMIZATION: Consolidate sparse MCTS tensors directly into contiguous Pinned Memory.
             for (int32_t b = 0; b < batchSize; ++b) {
                 std::memcpy(
                     h_input + b * Defs::kNNInputSize,
@@ -193,20 +192,21 @@ namespace Core
             }
 
             const size_t inputBytes = static_cast<size_t>(batchSize) * Defs::kNNInputSize * sizeof(float);
-            CUDA_CHECK(cudaMemcpyAsync(d_input, h_input, inputBytes, cudaMemcpyHostToDevice, m_stream));
 
-            // Async inference
+            // Asynchronous Execution: H2D -> Compute -> D2H
+            CUDA_CHECK(cudaMemcpyAsync(d_input, h_input, inputBytes, cudaMemcpyHostToDevice, m_stream));
             m_context->enqueueV3(m_stream);
 
-            // D2H — kValueOutSize = kNumPlayers * 3 floats per sample
             const size_t valueBytes = static_cast<size_t>(batchSize) * kValueOutSize * sizeof(float);
             const size_t policyBytes = static_cast<size_t>(batchSize) * Defs::kActionSpace * sizeof(float);
 
             CUDA_CHECK(cudaMemcpyAsync(h_values, d_values, valueBytes, cudaMemcpyDeviceToHost, m_stream));
             CUDA_CHECK(cudaMemcpyAsync(h_policy, d_policy, policyBytes, cudaMemcpyDeviceToHost, m_stream));
+
+            // Block CPU thread until the GPU stream fully completes
             CUDA_CHECK(cudaStreamSynchronize(m_stream));
 
-            // Unpack
+            // Unpack flat host buffers back into structured results
             for (int32_t b = 0; b < batchSize; ++b) {
                 ModelResults& res = results[static_cast<size_t>(b)];
 

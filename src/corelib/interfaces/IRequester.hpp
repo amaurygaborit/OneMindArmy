@@ -2,29 +2,17 @@
 #include "../bootstrap/GameConfig.hpp"
 #include "../model/GameTypes.hpp"
 
-// ============================================================================
-// IRequester.hpp — Action & State Request Interface
-//
-// A Requester is the bridge between the game loop and an external decision
-// source: a human player (via stdin / GUI), a remote UCI/protocol peer, or any
-// other non-AI agent.
-//
-// For AI agents the InferenceHandler drives the search tree directly and does
-// not go through IRequester. IRequester is only needed when at least one player
-// is human or externally controlled (numHumans > 0 in config).
-//
-// Implementors must override:
-//   specificSetup()      — load requester-specific YAML fields
-//   requestAction()      — block until the controlled player submits a move
-//
-// Optional overrides:
-//   notifyAction()       — inform the requester of a move made by another player
-//                          (useful to keep a remote GUI in sync)
-//   notifyResult()       — inform the requester of the final game outcome
-// ============================================================================
-
 namespace Core
 {
+    // ============================================================================
+    // EXTERNAL INPUT INTERFACE
+    // Bridges the autonomous game loop with external agents (Humans, GUIs, UCI).
+    //
+    // Design Intent:
+    // Bypassed entirely during self-play. Only instantiated when the YAML config 
+    // dictates external intervention, blocking the game thread until valid input 
+    // is received.
+    // ============================================================================
     template<ValidGameTraits GT>
     class IRequester
     {
@@ -37,42 +25,27 @@ namespace Core
     public:
         virtual ~IRequester() = default;
 
-        // -------------------------------------------------------------------
-        // SETUP
-        // -------------------------------------------------------------------
-
         void setup(const YAML::Node& config)
         {
             specificSetup(config);
         }
 
-        // -------------------------------------------------------------------
-        // REQUIRED INTERFACE
-        // -------------------------------------------------------------------
+        // --- REQUIRED ABSTRACTIONS ---
 
+        // Allows external agents to inject custom starting positions (e.g., FEN strings).
         virtual void requestInitialState(const uint32_t player, State& outState) const = 0;
 
-        /// Blocks until the externally-controlled player provides a legal move.
-        ///
-        /// @param state    Current game state (read-only; used to display the
-        ///                 board or validate keyboard input).
-        /// @param player   Index of the player who must move.
-        /// @param out      Filled with the chosen Action. Must be a legal move;
-        ///                 the requester is responsible for validation loops.
+        // Halts the game loop until the external agent provides a move.
+        // The requester is responsible for parsing and returning a valid Action struct.
         virtual Action requestAction(const State& state) const = 0;
 
-        // -------------------------------------------------------------------
-        // OPTIONAL NOTIFICATION HOOKS
-        // These default to no-ops. Override in requesters that maintain a
-        // remote view of the game (e.g. a UCI GUI or a network peer).
-        // -------------------------------------------------------------------
+        // --- OPTIONAL NOTIFICATION HOOKS ---
+        // Allows the requester to push engine events to remote endpoints (e.g., UCI).
 
-        /// Called by the game loop after any player (including AI) makes a move.
-        /// Allows the requester to forward the move to a remote UI or log file.
+        // Broadcasts moves made by the AI to keep external GUIs synchronized.
         virtual void notifyAction(const Action& action, uint32_t player) const {}
 
-        /// Called by the game loop when the game ends.
-        /// Allows the requester to display the result or send it to a remote peer.
+        // Broadcasts the final game outcome to external peers.
         virtual void notifyResult(const std::span<const float> result) const {}
     };
 }

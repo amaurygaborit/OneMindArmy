@@ -11,14 +11,12 @@ namespace Core
 {
     // ============================================================================
     // INFERENCE HANDLER (Match / Tournament / Human vs AI)
-    //
-    // Runs live games without generating training data.
-    //
-    // Move selection: always greedy (selectMove(0.0f) = most visited child).
-    //   - No temperature : the AI always plays its best move.
-    //   - No Gumbel noise: gumbelK should be 0 in the inference YAML config.
-    //     Exploration noise during MCTS is only useful in self-play to
-    //     diversify training data. In inference it hurts playing strength.
+    // Executes pure gameplay without generating training data.
+    // 
+    // Design Intent:
+    // Forces deterministic, greedy move selection. Exploration noise (Gumbel/PUCT)
+    // is disabled because diversifying states is detrimental to playing strength 
+    // outside of self-play training environments.
     // ============================================================================
     template<ValidGameTraits GT>
     class InferenceHandler : public IHandler<GT>
@@ -43,7 +41,6 @@ namespace Core
             std::vector<uint64_t> realHashHistory;
             realHashHistory.reserve(512);
 
-            // ---- Initialise state ----
             if (this->m_sessionCfg.autoInitialState)
                 this->m_engine->getInitialState(0, currentState);
             else
@@ -51,7 +48,6 @@ namespace Core
 
             realHashHistory.push_back(currentState.hash());
 
-            // ---- Bootstrap MCTS trees ----
             for (uint32_t p = 0; p < this->m_sessionCfg.numAIs; ++p)
                 this->m_treeSearch[p]->startSearch(currentState, realHashHistory);
 
@@ -65,9 +61,6 @@ namespace Core
                 std::cout << "\n[Inference] Match started. AI count: "
                 << this->m_sessionCfg.numAIs << "\n";
 
-            // ================================================================
-            // MAIN GAME LOOP
-            // ================================================================
             while (!finalOutcome.has_value())
             {
                 ++turnCount;
@@ -82,13 +75,13 @@ namespace Core
 
                 if (currentPlayer < this->m_sessionCfg.numAIs)
                 {
-                    // ---- AI turn ----
                     auto t0 = std::chrono::high_resolution_clock::now();
 
                     this->m_threadPool->executeTreeSearch(
                         this->m_treeSearch[currentPlayer].get(),
                         this->m_engineCfg.numSimulations);
 
+                    // Force strict exploitation for optimal play
                     const float temperature =
                         (turnCount < this->m_engineCfg.temperatureDropTurn)
                         ? 1.0f : 0.0f;
@@ -100,7 +93,6 @@ namespace Core
                 }
                 else
                 {
-                    // ---- Human / external turn ----
                     bool valid = false;
                     do {
                         selectedAction = this->m_requester->requestAction(currentState);
@@ -113,17 +105,16 @@ namespace Core
                     } while (!valid);
                 }
 
-                // ---- Apply move ----
                 this->m_engine->applyAction(selectedAction, currentState);
                 realHashHistory.push_back(currentState.hash());
 
-                // Mettre à jour l'arbre de *toutes* les IAs de la partie (pour garder leur cache MCTS en phase)
+                // Crucial: Update trees for ALL participating AIs, not just the active player,
+                // to maintain MCTS cache coherence and prevent tree resets on their next turn.
                 for (uint32_t p = 0; p < this->m_sessionCfg.numAIs; ++p)
                     this->m_treeSearch[p]->advanceRoot(selectedAction, currentState);
 
                 this->m_renderer->renderActionPlayed(selectedAction, currentPlayer);
 
-                // ---- Performance log ----
                 if (this->m_sessionCfg.verbose &&
                     currentPlayer < this->m_sessionCfg.numAIs)
                 {
@@ -143,9 +134,6 @@ namespace Core
                     this->m_engine->getGameResult(currentState, realHashHistory);
             }
 
-            // ================================================================
-            // MATCH FINISHED
-            // ================================================================
             this->m_renderer->renderState(currentState);
             this->m_renderer->renderResult(finalOutcome.value());
 

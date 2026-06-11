@@ -15,6 +15,17 @@
 
 namespace Core
 {
+    // ========================================================================
+    // PIPELINE ORCHESTRATOR
+    // Thread pool handling asynchronous MCTS traversal, Neural Network inference, 
+    // and backpropagation across multiple simultaneous games.
+    //
+    // Architecture:
+    // Implements a strict SEDA (Staged Event-Driven Architecture) pattern. 
+    // Tasks flow through 4 blocking queues (Ready -> FreeCtx -> Eval -> Backprop).
+    // Threads are rigidly specialized (Gather, Inference, Backprop) to maximize 
+    // L1/L2 cache coherency and eliminate lock contention.
+    // ========================================================================
     template<ValidGameTraits GT>
     class ThreadPool
     {
@@ -70,6 +81,7 @@ namespace Core
             for (uint32_t i = 0; i < backendCfg.numSearchThreads; ++i)
                 m_workers.emplace_back(&ThreadPool::loopGather, this);
 
+            // Assign dedicated inference threads pinned to specific GPUs
             for (uint32_t g = 0; g < static_cast<uint32_t>(m_neuralNets.size()); ++g)
                 for (uint32_t k = 0; k < backendCfg.numInferenceThreads; ++k)
                     m_workers.emplace_back(&ThreadPool::loopInference, this, static_cast<size_t>(g), backendCfg.inferenceBatchSize);
@@ -88,12 +100,16 @@ namespace Core
             for (auto& t : m_workers) if (t.joinable()) t.join();
         }
 
+        // Main entry point for tree traversal. Blocks until all specified trees 
+        // reach their target simulation count.
         void executeMultipleTrees(const std::vector<TreeSearch<GT>*>& trees, uint32_t numSims)
         {
             if (trees.empty() || numSims == 0) return;
             for (auto* tree : trees) tree->resetCounters();
 
-            // S'il y a plus d'un arbre géré en batch, c'est du Self-Play, un thread par arbre suffit.
+            // Self-Play mode traverses multiple games synchronously using Virtual Loss 
+            // across different trees. Inference mode traverses a single tree heavily using 
+            // Virtual Loss within the exact same tree.
             const bool isSelfPlay = (trees.size() > 1);
 
             uint32_t initialTasksTotal = 0;
@@ -126,6 +142,9 @@ namespace Core
         [[nodiscard]] size_t getFreeEventCount() const noexcept { return m_qFree.size(); }
 
     private:
+        // Worker Loop 1: GATHER
+        // Pulls free contexts, walks the tree to find an unexpanded leaf node, 
+        // encodes the tensor input, and passes it to the Evaluation queue.
         void loopGather()
         {
             TreeTask tTask;
@@ -146,16 +165,19 @@ namespace Core
                 }
 
                 tTask.tree->incrementLaunched();
-                ctx->isSelfPlay = tTask.isSelfPlay; // Propagation du flag pour Sequential Halving
+                ctx->isSelfPlay = tTask.isSelfPlay;
 
                 const bool needEval = tTask.tree->gather(*ctx);
                 EvalTask eTask{ tTask.tree, ctx, tTask.targetSims, tTask.isSelfPlay };
 
                 if (needEval) m_qEval.push(eTask);
-                else          m_qBackprop.push(eTask);
+                else          m_qBackprop.push(eTask); // Immediate terminal resolution bypasses GPU
             }
         }
 
+        // Worker Loop 2: INFERENCE
+        // Collects encoded state tensors from multiple trees into a single contiguous 
+        // batch, dispatches to TensorRT, and parses the WDL/Policy outputs.
         void loopInference(size_t gpuIdx, uint32_t configBatchSize)
         {
             if (cudaSetDevice(static_cast<int>(gpuIdx)) != cudaSuccess) {
@@ -184,6 +206,7 @@ namespace Core
 
                 net->forwardBatch(batchPtrs, batchOutputs);
 
+                // Unpack Neural Net output back into individual MCTS evaluation contexts
                 for (size_t i = 0; i < count; ++i)
                 {
                     EvalTask& eTask = batchTasks[i];
@@ -228,6 +251,9 @@ namespace Core
             }
         }
 
+        // Worker Loop 3: BACKPROPAGATION
+        // Unwinds the MCTS trajectory, updating node values and visit counts 
+        // up to the root, then recycles the context.
         void loopBackprop()
         {
             EvalTask eTask;

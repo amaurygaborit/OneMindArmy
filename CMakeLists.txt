@@ -1,9 +1,11 @@
 ﻿# ==============================================================================
-# CMakeLists.txt for OneMindArmy Project
+# ONE MIND ARMY — Root CMake Configuration
 # ==============================================================================
 
 cmake_minimum_required(VERSION 3.20)
 
+# Forces MSVC x64 by default on Windows to prevent silent fallbacks to 32-bit,
+# which immediately breaks CUDA and TensorRT linking.
 if(WIN32 AND NOT DEFINED CMAKE_GENERATOR)
     set(CMAKE_GENERATOR "Visual Studio 17 2022" CACHE STRING "Generator" FORCE)
     set(CMAKE_GENERATOR_PLATFORM "x64" CACHE STRING "Platform" FORCE)
@@ -22,9 +24,10 @@ set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 # ------------------------------------------------------------------------------
-# THE FIX: Global Output Directories
-# Forces all .exe and .lib files into shared build/bin and build/lib folders.
-# This strictly eliminates Linker Path errors on Windows.
+# GLOBAL OUTPUT ROUTING
+# Forces all static libraries (.lib) and executables (.exe) into shared root 
+# output folders. This completely eliminates linker path errors on Windows 
+# caused by nested CMake subdirectories.
 # ------------------------------------------------------------------------------
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -48,10 +51,11 @@ message(STATUS "[OneMindArmy] CUDA Toolkit Version: ${CUDAToolkit_VERSION}")
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
 # --- DEPENDENCY: YAML-CPP ---
+# Fetched directly from GitHub during configuration.
 include(FetchContent)
 message(STATUS "[OneMindArmy] Fetching yaml-cpp from remote repository...")
 
-# Disable tests to speed up CMake generation
+# Disables testing modules to accelerate CMake generation
 set(YAML_CPP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(YAML_CPP_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 
@@ -65,6 +69,7 @@ FetchContent_MakeAvailable(yaml-cpp)
 # --- DEPENDENCY: TENSORRT ---
 message(STATUS "[OneMindArmy] Resolving TensorRT dependency...")
 
+# TRT_ROOT must be exported as a system environment variable.
 set(TRT_ROOT $ENV{TRT_ROOT} CACHE PATH "Path to the TensorRT installation directory")
 
 find_path(TRT_INCLUDE_DIR NAMES NvInfer.h
@@ -94,7 +99,7 @@ endif()
 add_subdirectory(src/corelib)
 add_subdirectory(src/games/chess)
 
-# Main executable
+# Core executable wrapper
 add_executable(onemindarmy src/corelib/main.cpp)
 
 target_include_directories(onemindarmy PRIVATE ${TRT_INCLUDE_DIR})
@@ -108,7 +113,9 @@ target_link_libraries(onemindarmy PRIVATE
     ${TRT_LIBRARY_INFER}
 )
 
-# --- POST-BUILD: TensorRT DLLs ---
+# --- POST-BUILD SCRIPT ---
+# Automatically copies TensorRT runtime DLLs to the output binary directory 
+# on Windows to ensure the executable finds its dependencies at launch.
 if(WIN32 AND TRT_ROOT)
     file(GLOB TRT_DLLS "${TRT_ROOT}/lib/*.dll" "${TRT_ROOT}/bin/*.dll")
     if(TRT_DLLS)
@@ -116,12 +123,12 @@ if(WIN32 AND TRT_ROOT)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${TRT_DLLS}
             "$<TARGET_FILE_DIR:onemindarmy>"
-            COMMENT "[OneMindArmy] Smart copy of TensorRT DLLs..."
+            COMMENT "[OneMindArmy] Injecting TensorRT runtime libraries..."
         )
     endif()
 endif()
 
-# --- Compiler Optimizations ---
+# --- COMPILER OVERRIDES ---
 if(MSVC)
     add_compile_options(/utf-8)
     set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --allow-unsupported-compiler")

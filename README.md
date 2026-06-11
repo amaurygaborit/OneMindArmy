@@ -1,83 +1,73 @@
 # OneMindArmy
 
-**OneMindArmy** is a high-performance, general-purpose Reinforcement Learning framework written in **C++20**.
+**OneMindArmy** is a high-performance, game-agnostic Reinforcement Learning framework designed to train autonomous AI agents from scratch through self-play. 
 
-Designed to be game-agnostic, it unifies **Perfect Information** games (Chess, Go) and **Imperfect Information** games (Poker, Stratego) under a single, highly optimized architecture. It draws inspiration from **AlphaZero** for search dynamics and **ReBeL** for handling belief states via Bayesian updates.
+At its core, the framework separates the learning algorithms and search heuristics from the game rules. It leverages a highly optimized C++ engine for massive parallelization and a Python orchestrator for continuous integration, making it scalable, modular, and ready for Transformer-based architectures.
 
-## Key Features
+## The Game-Agnostic Framework
 
-### Unified Framework for Any Game
-OneMindArmy is not just a chess engine; it is a framework. Adding a new game requires implementing only a few standardized interfaces, regardless of the game's complexity or information visibility.
+OneMindArmy is built to understand *any* board game by relying on a strict abstraction layer and a universal data model:
 
-- **Perfect Information**: Standard MCTS with PUCT (AlphaZero style).
-- **Imperfect Information** *(In Progress)*:
-  - **Probabilistic Belief States**: Facts are represented as probability distributions rather than absolute values.
-  - **Bayesian Updates**: Beliefs evolve deterministically based on actions and observations, replacing naive sampling.
-  - **ReBeL-like Search**: MCTS operates over the *Belief Space* rather than the raw state space.
+* **Universal State Representation:** Environments are modeled using primitive entities (`Atom`, `Fact`, `Action`) mapped to unified bitsets (`BitsetT`). This natively supports both perfect information games (Dirac delta positions) and imperfect information games (probability clouds).
+* **Transformer-Ready Encoding:** The `StateEncoder` serializes the symbolic game state into continuous float tensors using strict absolute positional anchoring and dipole movement representations (penalizing source, boosting destination).
+* **Massively Parallel MCTS:** The search relies on a multi-threaded Monte Carlo Tree Search featuring **Gumbel Sequential Halving** for aggressive search space reduction. 
+* **GPU Batching & TensorRT:** Neural network inference is decoupled from the tree search. A dedicated `ThreadPool` gathers states across hundreds of parallel games and forwards them in optimized batches to TensorRT-compiled models.
+* **Continuous Orchestration:** The training loop is fully automated via `orchestrator.py`, which handles asynchronous data generation, sliding window datasets, hot-reloading of neural weights, and VRAM cleanup.
 
-### High-Performance Architecture
-- **Asynchronous Parallel MCTS**: Lock-free tree search with `std::atomic`, designed for massive scalability on multi-core CPUs.
-- **Batched Inference**: Opportunistic batching system that aggregates leaf evaluations from multiple threads to maximize GPU throughput via **CUDA**.
-- **Virtual Loss (Lc0 Style)**: Optimistic parallelization ensuring diverse exploration without thread collision.
-- **Tree Reusage**: Configurable persistence of the search tree between moves to save computation.
-- **Zero-Copy Design**: Extensive use of Memory Pools and `AlignedVec` to minimize allocation overhead.
+## Chess Implementation
 
-### Modular & Configurable
-- **Hierarchical Configuration**: Complete separation between Hardware (`backend`), Algorithm (`engine`), and Gameplay (`session`) settings via YAML.
-- **Fast Terminal Detection**: CPU-based "fast-path" for terminal states (Checkmate/Fold) bypasses the Neural Network for instant responses.
+The first concrete implementation of the OneMindArmy framework is **OMAChess**. By simply satisfying the `ValidGameTraits` C++ concept, the chess module plugs directly into the RL pipeline.
 
-## System Architecture
+* **Bitboard Engine:** Move generation is fully optimized using magic bitboards for sliding pieces and bitwise operations for pawn pushes and knight jumps.
+* **Complete Rule Support:** Full implementation of FIDE rules, including En Passant, castling rights, the 50-move rule, threefold repetition, and insufficient material detection.
+* **UCI Protocol Support:** Includes a `UCIHandler` to interact with standard chess GUIs (like Arena or Cute Chess).
+* **Integrated Perft Tool:** A built-in performance test tool to validate move generation accuracy and speed against known FEN positions.
 
-The framework revolves around a **GameTypeRegistry** that injects dependencies into a highly optimized worker pool.
+---
 
-1.  **MCTSThreadPool**: Orchestrates three types of workers:
-    - **Gather Threads**: Traverse the tree, apply Virtual Loss, and queue nodes for evaluation.
-    - **Inference Threads**: Batch requests and execute the `NeuralNet` forward pass on GPU.
-    - **Backprop Threads**: Update node statistics ($N, W, Q$) and handle belief updates.
-2.  **The Engine**: Pure C++ logic defining the game rules.
-3.  **The Handler**: Manages the game loop, switching between training, self-play, or human interaction.
+## Getting Started
 
-## Installation
+### 0. Prerequisites
+* **C++20** compatible compiler
+* **CMake** (>= 3.18)
+* **CUDA Toolkit**
+* **TensorRT** (NVIDIA)
+* **Python 3.x** (with `ruamel.yaml` and `psutil`)
 
-### Prerequisites
-- **C++20 Compiler** (MSVC 2022 recommended on Windows)
-- **CMake** (≥ 3.20)
-- **NVIDIA CUDA Toolkit** (Required for NeuralNet inference)
-
-### Build Instructions
-
-1. Clone the repository
+### 1. Clone the repository
 ```bash
-git clone https://github.com/amaurygaborit/OneMindArmy.git
+git clone [https://github.com/amaurygaborit/OneMindArmy.git](https://github.com/amaurygaborit/OneMindArmy.git)
 ```
 ```bash
 cd OneMindArmy
 ```
 
-2. Install TensorRT
-install tensorRT from nvidia and put it in a folder
-create a path environment named "TRT_ROOT" pointing to your folder
-
-4. Configure and Build
+### 2. Prepare the build directory
 ```bash
 mkdir build && cd build
 ```
+
+### 3. Configure CMake (adjust parameters for your GPU)
+To compile the C++ engine, clone the repository and run CMake. *Note: Replace `<YOUR_CUDA_ARCH>` (e.g., `86` for Ampere, `89` for Ada) and `</path/to/TensorRT>` with your specific hardware and software paths.*
 ```bash
-cmake ..
+cmake -DCMAKE_BUILD_TYPE=Release \\
+      -DCMAKE_CUDA_ARCHITECTURES=<YOUR_CUDA_ARCH> \\
+      -DTRT_ROOT=</path/to/TensorRT> \\
+      ..
+```
+
+### 4. Compile the engine
+```bash
+make -j$(nproc)
 ```
 ```bash
-cmake --build . --config Release
+cd ..
 ```
 
-## Configuration
-The framework uses a unified config.yaml to manage everything from GPU allocation to game strategy.
+## Run the Training Pipeline
+Once the C++ binaries are built, you can launch the autonomous self-play and training loop using the Python orchestrator. The pipeline will read the configuration, generate data, train the network, and dynamically replace the model.
 
-## How to Add a New Game
-To add a game (e.g., Poker), implement the following 4 interfaces:
-
-**ITraits**: Define your State and Action structures (Facts tensor) and constants (NumPlayers, ActionSpace, ...).
-**IEngine**: Implement getValidActions, applyAction, and isTerminal.
-**IRenderer**: Visualization logic (Console, GUI, or JSON output).
-**IRequester**: How to get input for human players.
-
-Register your game in CMakeLists.txt
+### Launch the orchestrator for 1000 iterations
+```bash
+python scripts/orchestrator.py configs/chess_train.yaml --iterations 1000
+```

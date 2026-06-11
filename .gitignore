@@ -1,5 +1,5 @@
 # ==============================================================================
-# Visual Studio & VS Code
+# IDE WORKSPACES
 # ==============================================================================
 .vs/
 .vscode/
@@ -8,11 +8,17 @@
 *.userosscache
 *.sln.docstates
 
+# ==============================================================================
+# RUNTIME DATA & MODELS
+# ==============================================================================
+# Prevents giant self-play datasets and multi-GB neural networks from 
+# saturating the git repository.
 scripts/__pycache__/
 data/
+models/
 
 # ==============================================================================
-# Build & CMake directories
+# CMAKE BUILD ARTIFACTS
 # ==============================================================================
 build/
 out/
@@ -25,7 +31,7 @@ Makefile
 compile_commands.json
 
 # ==============================================================================
-# Compiled Object files, Static and Dynamic libs (C++/CUDA)
+# COMPILED BINARIES
 # ==============================================================================
 *.obj
 *.o
@@ -41,17 +47,19 @@ compile_commands.json
 *.lib
 *.a
 *.exp
+
+# CUDA specific compiled kernels
 *.ptx
 *.cubin
 *.fatbin
 
 # ==============================================================================
-# Machine Learning / TensorRT
+# TENSORRT SERIALIZED ENGINES
 # ==============================================================================
 *.plan
 
 # ==============================================================================
-# OS specific files
+# OS CACHE FILES
 # ==============================================================================
 .DS_Store
 Thumbs.db

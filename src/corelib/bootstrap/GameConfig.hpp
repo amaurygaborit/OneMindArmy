@@ -11,8 +11,9 @@
 namespace Core
 {
     // ============================================================================
-    // SAFE YAML LOADER HELPER
-    // Ensures missing fields or out-of-bounds values trigger explicit exceptions.
+    // SAFE YAML LOADER
+    // Enforces strict type and boundary validation during parsing. 
+    // Fails fast to prevent silent runtime errors from malformed configurations.
     // ============================================================================
     template <typename T>
     T loadVal(const YAML::Node& node, const std::string& key, T minVal, T maxVal)
@@ -42,9 +43,6 @@ namespace Core
         return val;
     }
 
-    // ============================================================================
-    // 1. NETWORK CONFIGURATION 
-    // ============================================================================
     struct NetworkConfig
     {
         uint32_t dModel = 0;
@@ -56,11 +54,12 @@ namespace Core
         {
             const auto& node = root["network"];
 
-            // Le r�seau est obligatoire pour l'entra�nement ou l'export. En mode play, TensorRT s'en fiche.
+            // Architecture definition is mandatory for building models, 
+            // but can be safely bypassed during pure inference where TensorRT dictates the structure.
             if (!node) {
                 if (runMode == "train" || runMode == "export-meta")
                     throw std::runtime_error("Config Error: Missing 'network' block (Mandatory for " + runMode + ").");
-                return; // Optionnel en mode "play"
+                return;
             }
 
             dModel = loadVal<uint32_t>(node, "dModel", 1u, 8192u);
@@ -70,9 +69,6 @@ namespace Core
         }
     };
 
-    // ============================================================================
-    // 2. ENGINE CONFIGURATION (MCTS)
-    // ============================================================================
     struct EngineConfig
     {
         uint32_t numSimulations;
@@ -85,7 +81,7 @@ namespace Core
         float    gumbelCVisit;
         float    gumbelCScale;
 
-		float    fpuValue;
+        float    fpuValue;
         uint32_t maxNodes;
         float    memoryThreshold;
         bool     reuseTree;
@@ -107,7 +103,7 @@ namespace Core
             gumbelCVisit = loadVal<float>(node, "gumbelCVisit", 0.0f, INFINITY);
             gumbelCScale = loadVal<float>(node, "gumbelCScale", 0.0f, INFINITY);
 
-			fpuValue = loadVal<float>(node, "fpuValue", -100.0f, 100.0f);
+            fpuValue = loadVal<float>(node, "fpuValue", -100.0f, 100.0f);
             maxNodes = loadVal<uint32_t>(node, "maxNodes", 1u, UINT32_MAX);
             memoryThreshold = loadVal<float>(node, "memoryThreshold", 0.1f, 1.0f);
             reuseTree = loadVal<bool>(node, "reuseTree", false, true);
@@ -116,9 +112,6 @@ namespace Core
         }
     };
 
-    // ============================================================================
-    // 3. TRAINING CONFIGURATION 
-    // ============================================================================
     struct TrainingConfig
     {
         uint32_t gamesPerIteration = 0;
@@ -131,7 +124,7 @@ namespace Core
         float drawScore = 0.0f;
         float drawSampleRate = 0.0f;
 
-		uint32_t currentIteration = 0;
+        uint32_t currentIteration = 0;
 
         void load(const YAML::Node& root, const std::string& runMode)
         {
@@ -140,7 +133,7 @@ namespace Core
             if (!node) {
                 if (runMode == "train")
                     throw std::runtime_error("Config Error: Missing 'training' block (Mandatory for training).");
-                return; // Ignor� proprement en mode play
+                return; // Silently bypass for play/export modes to allow cleaner YAML files
             }
 
             gamesPerIteration = loadVal<uint32_t>(node, "gamesPerIteration", 1u, UINT32_MAX);
@@ -153,13 +146,10 @@ namespace Core
             drawScore = loadVal<float>(node, "drawScore", 0.0f, 1.0f);
             drawSampleRate = loadVal<float>(node, "drawSampleRate", 0.0f, 1.0f);
 
-			currentIteration = loadVal<uint32_t>(node, "currentIteration", 0u, UINT32_MAX);
+            currentIteration = loadVal<uint32_t>(node, "currentIteration", 0u, UINT32_MAX);
         }
     };
 
-    // ============================================================================
-    // 4. BACKEND CONFIGURATION 
-    // ============================================================================
     struct BackendConfig
     {
         uint32_t numGPUs;
@@ -177,6 +167,7 @@ namespace Core
             const auto& node = root["backend"];
             if (!node) throw std::runtime_error("Config Error: Missing 'backend' block (Always mandatory).");
 
+            // Auto-detect hardware limits to prevent allocation crashes
             int cudaCount = 0;
             cudaError_t err = cudaGetDeviceCount(&cudaCount);
             uint32_t availableGPUs = (err == cudaSuccess && cudaCount > 0) ? static_cast<uint32_t>(cudaCount) : 1u;
@@ -210,9 +201,6 @@ namespace Core
         }
     };
 
-    // ============================================================================
-    // 5. SESSION CONFIGURATION 
-    // ============================================================================
     template<typename GameConfig>
     struct SessionConfig
     {

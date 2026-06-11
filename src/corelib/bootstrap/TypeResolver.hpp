@@ -9,38 +9,37 @@
 namespace Core
 {
     // ========================================================================
-    // 1. L'INTERFACE (Contrat)
+    // RUNTIME ABSTRACTION
+    // Erases the concrete game types, allowing the main engine binary to 
+    // compile once and execute any registered game polymorphically.
     // ========================================================================
-    // Tout jeu doit savoir s'exécuter à partir d'une config YAML et des arguments CLI.
     struct IGameRunner
     {
         virtual ~IGameRunner() = default;
 
-        // --- NOUVELLE SIGNATURE STRICTE ---
-        // Le mode et le chemin du modèle sont injectés explicitement sans polluer le YAML.
+        // Contextual parameters injected directly via CLI to avoid mutating YAML
         virtual void run(const YAML::Node& config, const std::string& mode, const std::string& modelPath) const = 0;
     };
 
     // ========================================================================
-    // 2. LE REGISTRE (Conteneur Singleton)
+    // REGISTRY
+    // Thread-safe singleton holding references to all compiled game modules.
     // ========================================================================
-    // Il stocke les pointeurs vers les IGameRunner (Les Bootstrappers).
     class GameRegistry
     {
     private:
         std::unordered_map<std::string, IGameRunner*> m_runners;
 
-        GameRegistry() = default; // Privé pour Singleton
+        GameRegistry() = default;
 
     public:
-        // Singleton Thread-Safe (C++11 magic static)
         static GameRegistry& instance()
         {
             static GameRegistry inst;
             return inst;
         }
 
-        // Enregistre un jeu (appelé automatiquement au démarrage)
+        // Populated automatically prior to main() execution via AutoGameRegister
         void registerGame(const std::string& name, IGameRunner* runner)
         {
             if (m_runners.find(name) != m_runners.end()) {
@@ -50,7 +49,6 @@ namespace Core
             m_runners[name] = runner;
         }
 
-        // Récupère un jeu
         IGameRunner* get(const std::string& name) const
         {
             auto it = m_runners.find(name);
@@ -60,7 +58,7 @@ namespace Core
             return it->second;
         }
 
-        // Helper pour lancer directement (Signature mise à jour pour correspondre au main.cpp)
+        // Execution entry point invoked by main.cpp
         void run(const std::string& name, const YAML::Node& config, const std::string& mode, const std::string& modelPath) const
         {
             get(name)->run(config, mode, modelPath);

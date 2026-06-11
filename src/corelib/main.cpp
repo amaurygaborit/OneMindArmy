@@ -8,6 +8,11 @@
 
 #include "bootstrap/GameTypeRegistry.hpp"
 
+// ============================================================================
+// MAIN ENTRY POINT
+// Initializes the hardware environment, parses Command Line Arguments (CLI), 
+// and hands off execution to the polymorphic GameRegistry.
+// ============================================================================
 int main(int argc, char* argv[])
 {
     std::cout << "===================================\n"
@@ -18,12 +23,15 @@ int main(int argc, char* argv[])
     {
         std::cerr << "Usage: " << argv[0] << " <config.yaml> [options]\n"
             << "Options:\n"
-            << "  --mode <play|train>    Set the execution mode (default: play)\n"
+            << "  --mode <play|train|export-meta>  Set the execution mode (default: play)\n"
             << "  --model <model_file.plan> [REQUIRED] Set the TensorRT model file name\n"
             << std::endl;
         return EXIT_FAILURE;
     }
 
+    // CPU HARDWARE OPTIMIZATION: Flush-to-Zero (FTZ) & Denormals-Are-Zero (DAZ)
+    // Prevents severe CPU pipeline stalls caused by extreme precision floating-point 
+    // underflows (subnormal numbers) during Neural Network Softmax calculations.
     _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
     _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
 
@@ -31,7 +39,8 @@ int main(int argc, char* argv[])
     std::string runMode = "play";
     std::string modelFileName = "";
 
-    // 1. Parsing des arguments CLI
+    // 1. CLI Argument Parsing
+    // Extracts runtime execution context independently of the YAML configuration.
     for (int i = 2; i < argc; ++i) {
         std::string arg = argv[i];
         if (arg == "--mode" && i + 1 < argc) {
@@ -45,30 +54,37 @@ int main(int argc, char* argv[])
         }
     }
 
+    // The 'export-meta' pipeline extracts pure C++ geometry without requiring an active model.
     if (runMode != "export-meta" && modelFileName.empty()) {
         std::cerr << "[Error] You must specify a model file using --model (e.g., --model v0.plan)\n";
         return EXIT_FAILURE;
     }
 
     // 2. Safe Execution Block
+    // Traps and logs all setup-phase exceptions (e.g., missing YAML nodes) before 
+    // handing over control to the multithreaded handlers.
     try
     {
         std::cout << "[System] Loading configuration from: " << configFile << "...\n";
         YAML::Node config = YAML::LoadFile(configFile);
 
+        // The game name acts as the universal lookup key for the GameRegistry
         if (!config["name"]) {
             throw std::runtime_error("Configuration file is missing the required 'name' field.");
         }
         std::string gameName = config["name"].as<std::string>();
 
-        // 3. Construction Automatique du chemin du modèle
+        // 3. Automated Path Resolution
+        // Binds the relative model name to the specific game's directory.
         std::string finalModelPath = "models/" + gameName + "/" + modelFileName;
 
         std::cout << "[System] Initializing game module: [" << gameName << "]\n"
             << "[System] Mode: [" << runMode << "]\n"
             << "[System] Model Path: [" << finalModelPath << "]\n";
 
-        // 4. Lancement (On passe les arguments explicitement !)
+        // 4. Execution Dispatch
+        // Looks up the compiled GameBootstrapper associated with the parsed game name
+        // and triggers dependency injection.
         Core::GameRegistry::instance().run(gameName, config, runMode, finalModelPath);
     }
     catch (const std::exception& e)

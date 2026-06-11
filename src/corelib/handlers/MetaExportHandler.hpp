@@ -12,8 +12,9 @@ namespace Core
 {
     // ============================================================================
     // META EXPORT HANDLER
-    // Utility mode to resolve the "Chicken and Egg" bootstrapping paradox.
-    // Exports the C++ constexpr geometry to JSON so Python can generate v0.onnx.
+    // Resolves the bootstrapping paradox between C++ (engine) and Python (training).
+    // Exports compile-time C++ game geometries into JSON so Python can dynamically
+    // generate the matching initial Neural Network architecture (v0.onnx).
     // ============================================================================
     template<ValidGameTraits GT>
     class MetaExportHandler : public IHandler<GT>
@@ -31,7 +32,6 @@ namespace Core
             if (!config["name"]) {
                 throw std::runtime_error("Config Error: Missing 'name' field in YAML.");
             }
-            // A simple string extraction. LoadVal is reserved for bounded numerics.
             m_gameName = config["name"].as<std::string>();
         }
 
@@ -51,10 +51,9 @@ namespace Core
 
             if (metaFile.is_open())
             {
-                // ----------------------------------------------------------------
-                // NOUVEAU : On exporte la taille totale de la structure en octets
-                // (incluant le padding / alignement mémoire) pour le Dataset Python.
-                // ----------------------------------------------------------------
+                // Exports the exact memory footprint of the C++ TrainingSample struct.
+                // This accounts for OS/Compiler specific memory padding, guaranteeing 
+                // safe and perfectly aligned binary deserialization on the Python side.
                 metaFile << "{\n"
                     << "  \"numPlayers\": " << Defs::kNumPlayers << ",\n"
                     << "  \"numPos\": " << Defs::kNumPos << ",\n"

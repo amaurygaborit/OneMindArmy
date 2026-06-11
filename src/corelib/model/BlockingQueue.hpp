@@ -10,13 +10,20 @@
 namespace Core
 {
     // ========================================================================
-    // BLOCKING QUEUE (ring buffer, thread-safe, power-of-2 optimized)
+    // THREAD-SAFE RING BUFFER
+    // High-performance blocking queue for producer-consumer pipelines.
+    // 
+    // Design Intent:
+    // Optimizes memory alignment and modulo arithmetic by forcing the capacity 
+    // to the nearest power of 2. Uses atomic counters and condition variables 
+    // to handle asynchronous burst traffic between CPU threads and GPU inference.
     // ========================================================================
     template<typename T>
     class BlockingQueue
     {
-        // CORRECTION CRITIQUE : L'ordre de déclaration dicte l'ordre d'initialisation.
-        // m_capacity et m_mask DOIVENT être déclarés avant m_buffer.
+        // CRITICAL: Declaration order dictates initialization order.
+        // m_capacity and m_mask MUST be declared before m_buffer to guarantee 
+        // correct sizing during constructor member initialization.
         size_t        m_capacity;
         size_t        m_mask;
         AlignedVec<T> m_buffer;
@@ -31,7 +38,8 @@ namespace Core
         bool m_closed = false;
         bool m_fastDrain = false;
 
-        // Force la capacité à la puissance de 2 supérieure pour optimiser le wrap-around
+        // Elevates capacity to the next power of 2 to replace slow modulo '%' 
+        // operations with fast bitwise '&' during pointer wrap-around.
         static constexpr size_t nextPowerOf2(size_t n) {
             size_t count = 0;
             if (n && !(n & (n - 1))) return n;
@@ -59,6 +67,7 @@ namespace Core
                 m_fastDrain = fastDrain;
                 if (m_fastDrain) m_count = 0;
             }
+            // Awaken all pending threads so they can exit gracefully.
             m_cv_push.notify_all();
             m_cv_pop.notify_all();
         }
@@ -71,6 +80,8 @@ namespace Core
 
             m_buffer[m_tail] = item;
             m_tail = (m_tail + 1) & m_mask;
+
+            // Release semantic ensures the written item is visible before the count updates.
             m_count.fetch_add(1, std::memory_order_release);
 
             lock.unlock();
@@ -78,39 +89,38 @@ namespace Core
             return true;
         }
 
+        // Extracts multiple items simultaneously to minimize lock contention.
+        // Uses a timeout to prevent pipeline stalling if producers are slow.
         size_t pop_batch(AlignedVec<T>& out, size_t maxItems,
             std::chrono::microseconds timeout)
         {
             std::unique_lock lock(m_mutex);
 
-            // 1. On attend qu'il y ait AU MOINS un élément ou que la queue ferme.
-            // Attendre maxItems bloquerait inutilement le pipeline si la production est lente.
+            // Wait for AT LEAST one item. Waiting for maxItems would deadlock 
+            // the pipeline during low-traffic phases.
             m_cv_pop.wait_for(lock, timeout, [this] {
                 return m_count.load(std::memory_order_relaxed) > 0 || m_closed;
                 });
 
-            // 2. Vérification de l'état de fermeture
             size_t currentCount = m_count.load(std::memory_order_relaxed);
             if (m_closed && (currentCount == 0 || m_fastDrain)) {
                 return 0;
             }
 
-            // 3. On prend ce qu'il y a de disponible, dans la limite de maxItems
             size_t n = std::min(currentCount, maxItems);
             if (n == 0) return 0;
 
-            // 4. Extraction des données (m_head est protégé par le mutex)
             for (size_t i = 0; i < n; ++i) {
                 out.push_back(m_buffer[m_head]);
                 m_head = (m_head + 1) & m_mask;
             }
 
-            // 5. Mise à jour atomique du compteur AVANT de libérer le verrou
+            // Atomically decrement BEFORE releasing the lock to maintain consistency.
             m_count.fetch_sub(n, std::memory_order_release);
 
             lock.unlock();
 
-            // 6. Notification des producteurs (un batch de places s'est libéré)
+            // Notify producers that a batch of slots just opened up.
             m_cv_push.notify_all();
 
             return n;
