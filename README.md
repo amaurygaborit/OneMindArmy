@@ -27,18 +27,14 @@ The first concrete implementation of the OneMindArmy framework is **OMAChess**. 
 
 ## Getting Started
 
-### Prerequisites
+### 0. Prerequisites
 * **C++20** compatible compiler
 * **CMake** (>= 3.18)
 * **CUDA Toolkit**
 * **TensorRT** (NVIDIA)
 * **Python 3.x** (with `ruamel.yaml` and `psutil`)
 
-### Clone & Build
-
-To compile the C++ engine, clone the repository and run CMake. *Note: Replace `<YOUR_CUDA_ARCH>` (e.g., `86` for Ampere, `89` for Ada) and `</path/to/TensorRT>` with your specific hardware and software paths.*
-
-# 1. Clone the repository
+### 1. Clone the repository
 ```bash
 git clone [https://github.com/amaurygaborit/OneMindArmy.git](https://github.com/amaurygaborit/OneMindArmy.git)
 ```
@@ -46,12 +42,13 @@ git clone [https://github.com/amaurygaborit/OneMindArmy.git](https://github.com/
 cd OneMindArmy
 ```
 
-# 2. Prepare the build directory
+### 2. Prepare the build directory
 ```bash
 mkdir build && cd build
 ```
 
-# 3. Configure CMake (adjust parameters for your GPU)
+### 3. Configure CMake (adjust parameters for your GPU)
+To compile the C++ engine, clone the repository and run CMake. *Note: Replace `<YOUR_CUDA_ARCH>` (e.g., `86` for Ampere, `89` for Ada) and `</path/to/TensorRT>` with your specific hardware and software paths.*
 ```bash
 cmake -DCMAKE_BUILD_TYPE=Release \\
       -DCMAKE_CUDA_ARCHITECTURES=<YOUR_CUDA_ARCH> \\
@@ -59,7 +56,7 @@ cmake -DCMAKE_BUILD_TYPE=Release \\
       ..
 ```
 
-# 4. Compile the engine
+### 4. Compile the engine
 ```bash
 make -j$(nproc)
 ```
@@ -67,10 +64,10 @@ make -j$(nproc)
 cd ..
 ```
 
-### Run the Training Pipeline
+## Run the Training Pipeline
 Once the C++ binaries are built, you can launch the autonomous self-play and training loop using the Python orchestrator. The pipeline will read the configuration, generate data, train the network, and dynamically replace the model.
 
-# Launch the orchestrator for 1000 iterations
+### Launch the orchestrator for 1000 iterations
 ```bash
 python scripts/orchestrator.py configs/chess_train.yaml --iterations 1000
 ```
